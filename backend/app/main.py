@@ -7,12 +7,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from .config import settings
-from .database import init_db, create_scan, update_scan_status, add_scan_log, update_scan_data, get_scan, get_all_scans, track_stage, update_scan_perf_data, get_db_connection
+from .database import init_db, create_scan, update_scan_status, add_scan_log, update_scan_data, get_scan, get_all_scans, \
+    track_stage, update_scan_perf_data, get_db_connection
 from .crawler import crawl_site
 from .mcp_explorer import run_mcp_discovery, run_mcp_gap_exploration
 from .generator import generate_test_cases, export_to_excel
 from .schemas import ScanRequest, ScanResponse, ScanHistoryItem, ScopeContext
 from typing import Optional
+
 
 def log_pipeline(scan_id: str, scope_ctx: Optional[ScopeContext], tag: str, message: str):
     scope = "unknown"
@@ -25,6 +27,7 @@ def log_pipeline(scan_id: str, scope_ctx: Optional[ScopeContext], tag: str, mess
     prefix = f"[{tag}] [scan_id={scan_id}] [scope={scope}] [parent={parent}] [selected={selected}]"
     from .database import add_scan_log
     add_scan_log(scan_id, f"{prefix} {message}")
+
 
 app = FastAPI(title="AI QA Engineer Platform API", version="1.0")
 
@@ -44,15 +47,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # Initialize database on startup
 @app.on_event("startup")
 def startup_event():
     init_db()
 
+
 # Mount Static Files (for screenshots and Excel files)
 app.mount("/static", StaticFiles(directory=settings.STATIC_DIR), name="static")
 
-async def background_crawl_task(scan_id: str, url: str, username: str, password: str, description: str, api_key: str = None, model_name: str = None, scope_ctx: ScopeContext = None):
+
+async def background_crawl_task(scan_id: str, url: str, username: str, password: str, description: str,
+                                api_key: str = None, model_name: str = None, scope_ctx: ScopeContext = None):
     import time
     start_time = time.perf_counter()
     start_epoch = time.time() * 1000
@@ -63,11 +70,11 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
             "started_at": start_epoch,
             "scan_scope": scope_ctx.scan_scope if scope_ctx else "entire"
         })
-        
+
         # Stage: Initializing
         with track_stage(scan_id, "Initializing"):
             await asyncio.sleep(0.1)
-            
+
         # Stage: Authentication
         if username or password:
             with track_stage(scan_id, "Authentication"):
@@ -89,7 +96,7 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
             scan_id, url, visited_pages, username, password, api_key=api_key, model_name=model_name,
             scope_ctx=scope_ctx, user_description=description, storage_state_path=storage_state_path
         )
-        
+
         mcp_actions = 0
         mcp_llm_calls = 0
         features_queued_count = 0
@@ -116,7 +123,7 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
 
             gaps = mcp_behavior.get("coverage_gaps", [])
             features_queued_count = len(gaps)
-            
+
             if gaps:
                 p2_start = time.perf_counter()
                 gap_resolutions_json = await run_mcp_gap_exploration(
@@ -125,14 +132,14 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
                 )
                 p2_dur = time.perf_counter() - p2_start
                 gap_resolutions_res = json.loads(gap_resolutions_json)
-                
+
                 # Aggregate Pass 2 metrics
                 p2_metrics = gap_resolutions_res.get("metrics", {})
                 mcp_actions += p2_metrics.get("mcp_actions_count", 0)
                 mcp_llm_calls += p2_metrics.get("mcp_llm_calls_count", 0)
-                
+
                 gap_resolutions = gap_resolutions_res.get("resolutions", [])
-                
+
                 # Merge gap discoveries
                 modules_map = {m["module_name"]: m for m in mcp_behavior.get("modules", [])}
                 for res in gap_resolutions:
@@ -156,19 +163,20 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
                             "features": [feat]
                         }
                 mcp_behavior["modules"] = list(modules_map.values())
-                
+
                 # Remove resolved items from gap checklists
                 resolved_names = {r["feature"]["feature_name"] for r in gap_resolutions if r["feature"]["is_observed"]}
                 mcp_behavior["coverage_gaps"] = [g for g in gaps if g["feature"] not in resolved_names]
-                
+
                 resolved_count = len(gaps) - len(mcp_behavior["coverage_gaps"])
-                add_scan_log(scan_id, f"[MCP-EXPLORER] Gap exploration pass finished. Resolved {resolved_count}/{len(gaps)} coverage gaps.")
-                
+                add_scan_log(scan_id,
+                             f"[MCP-EXPLORER] Gap exploration pass finished. Resolved {resolved_count}/{len(gaps)} coverage gaps.")
+
             mcp_behavior_json = json.dumps(mcp_behavior)
         except Exception as err:
             add_scan_log(scan_id, f"[WARNING] Error running behavior gap-filling pass: {err}")
         mcp_end = time.perf_counter()
-        
+
         # Re-shape crawler data into graph nodes
         nodes = []
         for u, detail in visited_pages.items():
@@ -179,24 +187,25 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
                 "screenshot": detail["screenshot"],
                 "elements": detail
             })
-            
+
         app_map = {
             "nodes": nodes,
             "edges": edges
         }
-        
+
         with track_stage(scan_id, "Coverage Analysis"):
             await asyncio.sleep(0.1)
-        
+
         # 3. Generate manual test cases via LLM combining structural & behavioral discovery
         gen_start = time.perf_counter()
         with track_stage(scan_id, "Test Case Generation"):
-            test_cases = generate_test_cases(scan_id, app_map, description, api_key=api_key, model_name=model_name, mcp_behavior=mcp_behavior_json, scope_ctx=scope_ctx)
+            test_cases = generate_test_cases(scan_id, app_map, description, api_key=api_key, model_name=model_name,
+                                             mcp_behavior=mcp_behavior_json, scope_ctx=scope_ctx)
         gen_end = time.perf_counter()
-        
+
         # 3. Save map and test cases to DB
         update_scan_data(scan_id, app_map=app_map, test_cases=test_cases)
-        
+
         # 4. Generate styled Excel sheet
         excel_start = time.perf_counter()
         with track_stage(scan_id, "Excel Export"):
@@ -205,13 +214,13 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
             excel_path_full = export_to_excel(test_cases, excel_filename)
             excel_relative_path = f"/static/downloads/{excel_filename}"
         excel_end = time.perf_counter()
-        
+
         # Stage Completed: reset live markers
         update_scan_perf_data(scan_id, {
             "stage": "Completed",
             "stage_started_at": None
         })
-        
+
         # Build final breakdown
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -221,9 +230,9 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
         if row and row["perf_data"]:
             perf_data = json.loads(row["perf_data"])
         conn.close()
-        
+
         total_duration = time.perf_counter() - start_time
-        
+
         final_summary = {
             "scan": {
                 "duration": total_duration
@@ -270,12 +279,12 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
                 "duration": excel_end - excel_start
             }
         }
-        
+
         update_scan_perf_data(scan_id, {
             "status": "completed",
             "final_summary": final_summary
         })
-        
+
         # Fetch individual sub-stages for MCP Performance Summary
         mcp_stages = perf_data.get("stages_completed", {})
         startup_dur = mcp_stages.get("MCP Process Startup", 0.0)
@@ -287,20 +296,20 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
         exploration_dur = mcp_stages.get("Behavioral Exploration", 0.0)
         shutdown_dur = mcp_stages.get("MCP Shutdown", 0.0)
         llm_dur = final_summary.get("llm", {}).get("duration", 0.0)
-        
+
         # Calculate total mcp time
-        total_mcp_time = (startup_dur + session_dur + tool_disc_dur + browser_launch_dur + 
+        total_mcp_time = (startup_dur + session_dur + tool_disc_dur + browser_launch_dur +
                           nav_dur + snapshot_dur + exploration_dur + shutdown_dur)
-        
+
         # Compute count metrics
         features_discovered = final_summary.get("mcp", {}).get("features_explored", 0)
         observed_count = sum(1 for tc in test_cases if tc.get("observed_behavior") == "OBSERVED_BEHAVIOR")
         skipped_count = sum(1 for tc in test_cases if tc.get("observed_behavior") == "SKIPPED_SCENARIO")
         structural_count = sum(1 for tc in test_cases if tc.get("observed_behavior") == "STRUCTURAL_EVIDENCE")
         inferred_count = sum(1 for tc in test_cases if tc.get("observed_behavior") == "INFERRED_SCENARIO")
-        
+
         stdio_conn_dur = session_dur
-        
+
         # Log timing metrics block
         add_scan_log(scan_id, "==================================================")
         add_scan_log(scan_id, "             MCP PERFORMANCE SUMMARY              ")
@@ -335,7 +344,7 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
         add_scan_log(scan_id, f"Features Skipped:            {skipped_count}")
         add_scan_log(scan_id, f"Features Failed:             {structural_count}")
         add_scan_log(scan_id, "==================================================")
-        
+
         # Bottleneck detection
         durations = {
             "Gemini behavioral reasoning": llm_dur,
@@ -374,26 +383,28 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
         add_scan_log(scan_id, f" TOTAL")
         add_scan_log(scan_id, f"  Duration: {total_duration:.1f}s")
         add_scan_log(scan_id, "==================================================")
-        
+
         # 5. Mark scan as completed
         update_scan_status(scan_id, "completed", excel_path=excel_relative_path)
         add_scan_log(scan_id, "[SUCCESS] Scan completed! Excel report generated and ready for download.")
-        
+
     except Exception as e:
         import traceback
         tb_str = traceback.format_exc()
-        add_scan_log(scan_id, f"[ERROR] Background scan task encountered a critical failure: {str(e)}\nTraceback:\n{tb_str}")
+        add_scan_log(scan_id,
+                     f"[ERROR] Background scan task encountered a critical failure: {str(e)}\nTraceback:\n{tb_str}")
         update_scan_status(scan_id, "failed")
         update_scan_perf_data(scan_id, {
             "status": "failed",
             "error_msg": str(e)
         })
 
+
 @app.post("/api/scan", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     scan_id = str(uuid.uuid4())
     create_scan(scan_id, str(request.url), request.description)
-    
+
     scope_ctx = ScopeContext(
         scan_scope=request.scan_scope or "entire",
         parent_module=request.parent_module,
@@ -401,10 +412,12 @@ async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         target_urls=[],
         allowed_features=[]
     )
-    
+
     log_pipeline(scan_id, scope_ctx, "SCAN-CONFIG", f"Scan request received for URL: {request.url}")
-    log_pipeline(scan_id, scope_ctx, "SCAN-CONFIG", f"Parameters: scan_scope={scope_ctx.scan_scope}, parent_module={scope_ctx.parent_module}, selected_module={scope_ctx.selected_module}")
-    add_scan_log(scan_id, f"[SCAN-DEBUG][scan_id={scan_id}][stage=INITIALIZING]\nScopeContext created: scan_scope={scope_ctx.scan_scope}, parent_module={scope_ctx.parent_module}, selected_module={scope_ctx.selected_module}")
+    log_pipeline(scan_id, scope_ctx, "SCAN-CONFIG",
+                 f"Parameters: scan_scope={scope_ctx.scan_scope}, parent_module={scope_ctx.parent_module}, selected_module={scope_ctx.selected_module}")
+    add_scan_log(scan_id,
+                 f"[SCAN-DEBUG][scan_id={scan_id}][stage=INITIALIZING]\nScopeContext created: scan_scope={scope_ctx.scan_scope}, parent_module={scope_ctx.parent_module}, selected_module={scope_ctx.selected_module}")
     background_tasks.add_task(
         background_crawl_task,
         scan_id,
@@ -416,26 +429,35 @@ async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         request.model_name,
         scope_ctx
     )
-    
+
     return {"scan_id": scan_id}
+
+
+@app.get("/api/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "service": "AI QA Engineer"
+    }
+
 
 @app.get("/api/scan/{scan_id}", response_model=ScanResponse)
 def get_scan_status(scan_id: str, response: Response):
     response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
-    
+
     scan = get_scan(scan_id)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan job not found")
-        
+
     perf_val = None
     try:
         if "perf_data" in scan.keys() and scan["perf_data"]:
             perf_val = json.loads(scan["perf_data"])
     except Exception:
         pass
-        
+
     return {
         "id": scan["id"],
         "url": scan["url"],
@@ -449,26 +471,28 @@ def get_scan_status(scan_id: str, response: Response):
         "perf_data": perf_val
     }
 
+
 @app.get("/api/scans", response_model=list[ScanHistoryItem])
 def list_scans(response: Response):
     response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
-    
+
     return get_all_scans()
+
 
 @app.get("/api/scan/{scan_id}/download")
 def download_excel(scan_id: str):
     scan = get_scan(scan_id)
     if not scan or not scan["excel_path"]:
         raise HTTPException(status_code=404, detail="Excel report not found or scan is not completed")
-        
+
     filename = os.path.basename(scan["excel_path"])
     full_path = os.path.join(settings.DOWNLOADS_DIR, filename)
-    
+
     if not os.path.exists(full_path):
         raise HTTPException(status_code=404, detail="Excel file does not exist on disk")
-        
+
     return FileResponse(
         path=full_path,
         filename=filename,

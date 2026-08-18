@@ -3,12 +3,10 @@ import { Bot, Plus, Network, LayoutGrid, FileText, Terminal, CheckCircle2, Alert
 import Dashboard from './components/Dashboard';
 import CrawlerMap from './components/CrawlerMap';
 import TestCaseTable from './components/TestCaseTable';
-import HistoryList from './components/HistoryList';
 import { apiFetch, resolveAssetUrl } from './api';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard'); // 'dashboard' | 'scan-details'
-  const [scans, setScans] = useState([]);
   const [selectedScanId, setSelectedScanId] = useState(null);
   const [scanDetails, setScanDetails] = useState(null);
   
@@ -38,22 +36,6 @@ export default function App() {
       m.toString().padStart(2, '0'),
       s.toString().padStart(2, '0')
     ].join(':');
-  };
-
-  // Behavior Engine status -> { label, badgeClass }. Never implies MCP succeeded just because
-  // an action count is non-zero - the actions may have come entirely from the Playwright Core
-  // fallback while MCP itself never worked.
-  const describeBehaviorEngine = (engine) => {
-    switch (engine) {
-      case 'MCP':
-        return { label: 'MCP', badgeClass: 'low' };
-      case 'COMPLETED_WITH_FALLBACK':
-        return { label: 'MCP → Playwright Core Fallback', badgeClass: 'medium' };
-      case 'FAILED':
-        return { label: 'Failed', badgeClass: 'high' };
-      default:
-        return { label: engine || 'Unknown', badgeClass: 'medium' };
-    }
   };
 
   useEffect(() => {
@@ -200,14 +182,13 @@ export default function App() {
     return parsedSteps;
   };
 
-  // Fetch scans list
+  // Fetch scans list (used only to auto-resume the most recent scan on load - the visible
+  // scan history UI has been removed, but this underlying lookup is kept).
   const fetchScansList = async () => {
     try {
       const res = await apiFetch('/api/scans');
       if (res.ok) {
-        const data = await res.json();
-        setScans(data);
-        return data;
+        return await res.json();
       }
     } catch (e) {
       console.error("Error fetching scans list", e);
@@ -291,21 +272,6 @@ export default function App() {
     }
   };
 
-  const handleSelectScanHistory = (id) => {
-    setSelectedScanId(id);
-    setActiveTab('scan-details');
-    setResultsTab('map');
-    
-    // Check if the clicked scan is running or pending. If so, poll it.
-    const matchingScan = scans.find(s => s.id === id);
-    if (matchingScan && (matchingScan.status === 'running' || matchingScan.status === 'pending')) {
-      startPolling(id);
-    } else {
-      stopPolling();
-      fetchScanDetails(id);
-    }
-  };
-
   const clickNewScanMenu = () => {
     stopPolling();
     setActiveTab('dashboard');
@@ -369,12 +335,16 @@ export default function App() {
   };
 
   const steps = getStepperState();
-  const logsPanelEndRef = useRef(null);
+  const logPanelContainerRef = useRef(null);
 
-  // Auto-scroll console logger to bottom
+  // Auto-scroll the live console log panel to its newest entry. This must only move the log
+  // panel's own internal scroll (scrollTop), never the main page: scrollIntoView() on a nested
+  // element walks up every scrollable ancestor - including the window itself - which was the
+  // root cause of the main page repeatedly jumping down while a scan was running.
   useEffect(() => {
-    if (logsPanelEndRef.current) {
-      logsPanelEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    const panel = logPanelContainerRef.current;
+    if (panel) {
+      panel.scrollTop = panel.scrollHeight;
     }
   }, [scanDetails?.progress_log]);
 
@@ -407,15 +377,6 @@ export default function App() {
             </li>
           )}
         </ul>
-
-        {/* History Sub-sidebar */}
-        <div style={{ marginTop: '2rem', borderTop: '1px solid var(--border)', paddingTop: '1.5rem' }}>
-          <HistoryList 
-            scans={scans}
-            activeScanId={selectedScanId}
-            onSelectScan={handleSelectScanHistory}
-          />
-        </div>
       </aside>
 
       {/* 2. Main Viewport Panel */}
@@ -441,20 +402,22 @@ export default function App() {
                   UI DESIGN PROMPT - AI QA ENGINEER (APPLICATION MAP WORKSPACE)
                 </h1>
                 <p className="page-subtitle">
-                  Design the following AI QA Engineer workspace page exactly like the reference image. Scanned URL: <span style={{ color: 'var(--primary)', fontFamily: 'var(--font-mono)' }}>{scanDetails.url}</span>
+                  Scanned URL: <span style={{ color: 'var(--primary)', fontFamily: 'var(--font-mono)' }}>{scanDetails.url}</span>
                 </p>
               </div>
-              
+
               {scanDetails.excel_path && (
-                <a 
-                  href={`/api/scan/${scanDetails.id}/download`} 
-                  className="primary-btn" 
+                <a
+                  href={`/api/scan/${scanDetails.id}/download`}
+                  className="primary-btn"
                   style={{ textDecoration: 'none', background: 'linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%)', boxShadow: '0 4px 15px rgba(124, 58, 237, 0.3)', padding: '0.6rem 1.25rem', fontSize: '0.85rem' }}
                 >
                   <Download size={14} style={{ marginRight: '6px', verticalAlign: 'middle' }} />
                   Download Excel Suite
                 </a>
               )}
+              
+
             </header>
             {/* Live Scan Status Card */}
             {(scanDetails.status === 'running' || scanDetails.status === 'pending') && (
@@ -588,7 +551,7 @@ export default function App() {
                     <Terminal size={18} style={{ color: 'var(--primary)' }} />
                     Live Agent Terminal Console
                   </h3>
-                  <div className="log-panel">
+                  <div className="log-panel" ref={logPanelContainerRef}>
                     {scanDetails.progress_log.map((log, i) => {
                       let type = 'info';
                       if (log.includes('[START]') || log.includes('[SUCCESS]')) type = 'success';
@@ -603,14 +566,13 @@ export default function App() {
                     {/* Live Line in CLI logs */}
                     {scanDetails.status === 'running' && scanDetails.perf_data && (
                       <div className="log-line info" style={{ color: '#60a5fa', fontWeight: 'bold' }}>
-                        &gt; [{scanDetails.perf_data.stage || 'Initializing'}] 
+                        &gt; [{scanDetails.perf_data.stage || 'Initializing'}]
                         {scanDetails.perf_data.feature ? ` ${scanDetails.perf_data.feature}` : ''}
                         {scanDetails.perf_data.operation ? ` -> ${scanDetails.perf_data.operation}` : ''}
                         {scanDetails.perf_data.llm_stage ? ` [LLM: ${scanDetails.perf_data.llm_stage}]` : ''}
                         {" - 🟢 RUNNING - Elapsed: "}{formatTime(liveTimers.stageElapsed)}
                       </div>
                     )}
-                    <div ref={logsPanelEndRef} />
                   </div>
                 </div>
  
@@ -651,71 +613,6 @@ export default function App() {
                         </div>
                         <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>
                           Total Duration: {formatTime(Math.floor(scanDetails.perf_data.final_summary.llm?.duration || 0))}
-                        </div>
-                      </div>
-                    </div>
-                    
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem', borderTop: '1px solid var(--border)', paddingTop: '1.25rem' }}>
-                      <div style={{ background: 'rgba(255,255,255,0.02)', padding: '0.75rem', borderRadius: '8px', border: '1px solid var(--border)' }}>
-                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>Static Crawler</div>
-                        <div style={{ fontSize: '0.95rem', fontWeight: 700, margin: '2px 0' }}>
-                          {formatTime(Math.floor(scanDetails.perf_data.final_summary.crawler?.duration || 0))}
-                        </div>
-                        <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
-                          Visited: {scanDetails.perf_data.final_summary.crawler?.pages_visited || 0} pages
-                        </div>
-                      </div>
-                      
-                      <div style={{ background: 'rgba(255,255,255,0.02)', padding: '0.75rem', borderRadius: '8px', border: '1px solid var(--border)' }}>
-                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>Behavior Engine</div>
-                        {(() => {
-                          const mcpSummary = scanDetails.perf_data.final_summary.mcp || {};
-                          const pwSummary = scanDetails.perf_data.final_summary.playwright_core || {};
-                          const { label, badgeClass } = describeBehaviorEngine(mcpSummary.engine);
-                          return (
-                            <>
-                              <div style={{ margin: '4px 0' }}>
-                                <span className={`badge ${badgeClass}`}>{label}</span>
-                              </div>
-                              <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
-                                MCP: {mcpSummary.actions || 0} ops
-                                {pwSummary.successful_calls > 0 && ` · Playwright Core: ${pwSummary.successful_calls} ops`}
-                              </div>
-                              <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
-                                {formatTime(Math.floor((mcpSummary.exploration_duration || 0) + (mcpSummary.startup_duration || 0) + (pwSummary.duration || 0)))}
-                              </div>
-                            </>
-                          );
-                        })()}
-                      </div>
-
-                      <div style={{ background: 'rgba(255,255,255,0.02)', padding: '0.75rem', borderRadius: '8px', border: '1px solid var(--border)' }}>
-                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>Gap Exploration</div>
-                        <div style={{ fontSize: '0.95rem', fontWeight: 700, margin: '2px 0' }}>
-                          {formatTime(Math.floor(scanDetails.perf_data.final_summary.gap_exploration?.duration || 0))}
-                        </div>
-                        <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
-                          Coverage Analysis: {formatTime(Math.floor(scanDetails.perf_data.final_summary.coverage?.duration || 0))}
-                        </div>
-                      </div>
-
-                      <div style={{ background: 'rgba(255,255,255,0.02)', padding: '0.75rem', borderRadius: '8px', border: '1px solid var(--border)' }}>
-                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>Test Generation</div>
-                        <div style={{ fontSize: '0.95rem', fontWeight: 700, margin: '2px 0' }}>
-                          {formatTime(Math.floor(scanDetails.perf_data.final_summary.generation?.duration || 0))}
-                        </div>
-                        <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
-                          Quality Gate: {formatTime(Math.floor(scanDetails.perf_data.final_summary.quality_gate?.duration || 0))}
-                        </div>
-                      </div>
-
-                      <div style={{ background: 'rgba(255,255,255,0.02)', padding: '0.75rem', borderRadius: '8px', border: '1px solid var(--border)' }}>
-                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>Excel Writing</div>
-                        <div style={{ fontSize: '0.95rem', fontWeight: 700, margin: '2px 0' }}>
-                          {formatTime(Math.floor(scanDetails.perf_data.final_summary.excel?.duration || 0))}
-                        </div>
-                        <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
-                          Saved report to disk
                         </div>
                       </div>
                     </div>
@@ -794,7 +691,7 @@ export default function App() {
                     onClick={() => setResultsTab('logs')}
                   >
                     <Terminal size={16} />
-                    Crawl Console Logs
+                    Console Logs
                   </button>
                 </div>
 

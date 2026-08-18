@@ -5,8 +5,14 @@ services:
     rootDir: backend
     dockerfilePath: ./Dockerfile
     plan: starter
+    disk:
+      name: qa-platform-data
+      mountPath: /app/data
+      sizeGB: 1
     envVars:
       - key: GEMINI_API_KEY
         sync: false
       - key: ALLOWED_ORIGINS
         sync: false
+      - key: DATA_DIR
+        value: /app/data
