@@ -1,0 +1,43 @@
+# --- Python / backend ---
+backend/venv/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment variables
+backend/.env
+backend/.env.*
+!.env.example
+
+# Backend runtime data & artifacts
+# Regenerated at runtime and may contain session cookies,
+# scan history, screenshots, or generated reports.
+backend/qa_platform.db
+backend/static/screenshots/
+backend/static/downloads/
+backend/static/storage_state/
+backend/scratch/
+
+# --- Node / frontend ---
+frontend/node_modules/
+frontend/dist/
+
+# Environment variables
+frontend/.env
+frontend/.env.*
+!.env.example
+
+# --- IDE ---
+.idea/
+.vscode/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Playwright MCP runtime data ---
+backend/.playwright-mcp/
+
+# --- Generated images / test artifacts ---
+backend/*.png

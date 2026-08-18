@@ -1,0 +1,16 @@
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.env
+
+# Runtime data/artifacts - not needed in the image, and some are sensitive (real session
+# cookies, real scan history/screenshots captured during testing).
+qa_platform.db
+static/screenshots/
+static/downloads/
+static/storage_state/
+scratch/
+
+.idea/
+*.md
