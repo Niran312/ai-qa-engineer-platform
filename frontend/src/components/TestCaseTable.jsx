@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Download, Search, ChevronRight, ChevronDown, CheckCircle2 } from 'lucide-react';
-import { API_BASE_URL } from '../api';
+import { resolveAssetUrl } from '../api';
 
 export default function TestCaseTable({ testCases, scanId, excelPath }) {
   const [searchQuery, setSearchQuery] = useState('');
@@ -17,7 +17,7 @@ export default function TestCaseTable({ testCases, scanId, excelPath }) {
 
   const handleDownload = () => {
     if (!scanId) return;
-    window.open(`${API_BASE_URL}/api/scan/${scanId}/download`, '_blank');
+    window.open(resolveAssetUrl(`/api/scan/${scanId}/download`), '_blank');
   };
 
   // 1. Run Filters

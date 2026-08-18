@@ -202,18 +202,29 @@ export default function App() {
       const res = await apiFetch(`/api/scan/${id}`);
       if (res.ok) {
         const data = await res.json();
-        setScanDetails(data);
-        
+        // Normalize the shape defensively so every downstream render (app_map.nodes,
+        // test_cases.map, progress_log.map, ...) always has a safe default to work with,
+        // even if the backend ever returns a partial/malformed payload - a bad response here
+        // must not be able to blank the whole workspace.
+        setScanDetails({
+          ...data,
+          app_map: data.app_map && typeof data.app_map === 'object' ? data.app_map : { nodes: [], edges: [] },
+          test_cases: Array.isArray(data.test_cases) ? data.test_cases : [],
+          progress_log: Array.isArray(data.progress_log) ? data.progress_log : [],
+        });
+
         // Reset page nodes selected details when changing scan
         if (selectedScanId !== id) {
           setSelectedPageNode(null);
         }
-        
+
         // Stop polling if completed or failed
         if (data.status === 'completed' || data.status === 'failed') {
           stopPolling();
           fetchScansList();
         }
+      } else {
+        console.error(`Error fetching scan details: HTTP ${res.status}`);
       }
     } catch (e) {
       console.error("Error fetching scan details", e);
@@ -264,9 +275,14 @@ export default function App() {
         setResultsTab('map');
         // Begin progress tracking
         startPolling(data.scan_id);
+      } else {
+        const detail = await res.json().catch(() => null);
+        console.error(`Failed to start scan: HTTP ${res.status}`, detail);
+        window.alert(`Failed to start scan (HTTP ${res.status}): ${detail?.detail ? JSON.stringify(detail.detail) : 'Check the console for details.'}`);
       }
     } catch (e) {
       console.error("Failed to post new scan request", e);
+      window.alert('Failed to reach the backend. Please check your connection and try again.');
     } finally {
       setLoadingNewScan(false);
     }
@@ -408,7 +424,7 @@ export default function App() {
 
               {scanDetails.excel_path && (
                 <a
-                  href={`/api/scan/${scanDetails.id}/download`}
+                  href={resolveAssetUrl(`/api/scan/${scanDetails.id}/download`)}
                   className="primary-btn"
                   style={{ textDecoration: 'none', background: 'linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%)', boxShadow: '0 4px 15px rgba(124, 58, 237, 0.3)', padding: '0.6rem 1.25rem', fontSize: '0.85rem' }}
                 >
@@ -419,6 +435,22 @@ export default function App() {
               
 
             </header>
+
+            {/* Failed Scan State - the workspace has no other content to show once a scan
+                fails before generating any app_map/test_cases, so without this the page
+                looked blank below the header. */}
+            {scanDetails.status === 'failed' && (
+              <div className="glass-card" style={{ marginBottom: '1.5rem', padding: '1.25rem', border: '1px solid rgba(239, 68, 68, 0.3)', background: 'rgba(239, 68, 68, 0.08)' }}>
+                <h3 style={{ fontFamily: 'var(--font-title)', fontSize: '1.1rem', fontWeight: 700, color: '#f87171', display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '0.5rem' }}>
+                  <AlertCircle size={18} />
+                  Scan Failed
+                </h3>
+                <p style={{ fontSize: '0.9rem', color: 'var(--text-main)', fontFamily: 'var(--font-mono)', wordBreak: 'break-word', margin: 0 }}>
+                  {scanDetails.perf_data?.error_msg || 'The scan could not complete. Check Console Logs for details.'}
+                </p>
+              </div>
+            )}
+
             {/* Live Scan Status Card */}
             {(scanDetails.status === 'running' || scanDetails.status === 'pending') && (
               <div className="glass-card" style={{ marginBottom: '1.5rem', padding: '1.25rem', border: '1px solid var(--primary-low)', background: 'rgba(17, 17, 24, 0.85)' }}>
