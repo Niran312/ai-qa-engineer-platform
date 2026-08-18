@@ -259,7 +259,7 @@ export default function Dashboard({onSubmit, loading}) {
                         >
                             <option value="" disabled>Select scan scope...</option>
                             <option value="entire">Entire Application</option>
-                            <option value="module">Module Wise</option>
+                            {/*<option value="module">Module Wise</option>*/}
                         </select>
                     </div>
                 )}
