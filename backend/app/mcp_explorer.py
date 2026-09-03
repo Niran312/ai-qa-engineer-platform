@@ -5,7 +5,7 @@ import urllib.parse
 import time
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
-import google.generativeai as genai
+from .ai_provider import OpenRouterModel
 from .mcp.playwright_client import PlaywrightMCPClient
 from .config import settings
 from .database import add_scan_log, track_llm_call, update_scan_perf_data, get_db_connection, save_completed_stage_dur
@@ -429,7 +429,7 @@ async def run_mcp_discovery(scan_id: str, url: str, visited_pages: dict, usernam
     """Runs deterministic feature queue exploration with safety gates, returning structured behavior reports."""
     log_pipeline(scan_id, scope_ctx, "MCP-SCOPE", "Starting Structured Behavior Discovery Stage...")
     
-    gen_key = api_key or settings.GEMINI_API_KEY
+    gen_key = api_key or settings.OPENROUTER_API_KEY
     if not gen_key:
         log_pipeline(scan_id, scope_ctx, "MCP-SCOPE", "[WARNING] No API key provided. Skipping MCP behavioral discovery.")
         return json.dumps({"modules": [], "safety_actions_log": [], "coverage_gaps": []})
@@ -483,10 +483,10 @@ async def run_mcp_discovery(scan_id: str, url: str, visited_pages: dict, usernam
         # is just a more fundamental version of "MCP is unavailable," handled identically
         # regardless of scan scope.
 
-    # Configure Gemini
-    genai.configure(api_key=gen_key)
-    selected_model = model_name or "gemini-1.5-flash"
-    model = genai.GenerativeModel(selected_model)
+    # Configure the AI provider
+    model = OpenRouterModel(api_key=gen_key, model_name=settings.OPENROUTER_PRIMARY_MODEL,
+                             fallback_models=[m.strip() for m in settings.OPENROUTER_FALLBACK_MODELS.split(",") if m.strip()],
+                             scan_id=scan_id)
 
     browser_launched = False
     total_explore_dur = 0.0
@@ -1149,7 +1149,7 @@ async def run_mcp_gap_exploration(scan_id: str, url: str, gaps: List[Dict[str, A
 
     log_pipeline(scan_id, scope_ctx, "MCP-SCOPE", f"[PASS 2] Launching Gap-filling Explorer to resolve {len(gaps)} coverage gaps...")
 
-    gen_key = api_key or settings.GEMINI_API_KEY
+    gen_key = api_key or settings.OPENROUTER_API_KEY
     if not gen_key:
         return json.dumps([])
 
@@ -1166,9 +1166,9 @@ async def run_mcp_gap_exploration(scan_id: str, url: str, gaps: List[Dict[str, A
         log_pipeline(scan_id, scope_ctx, "MCP-SCOPE", f"[WARNING] Gap-filling Explorer failed to connect: {e}")
         return json.dumps([])
 
-    genai.configure(api_key=gen_key)
-    selected_model = model_name or "gemini-1.5-flash"
-    model = genai.GenerativeModel(selected_model)
+    model = OpenRouterModel(api_key=gen_key, model_name=settings.OPENROUTER_PRIMARY_MODEL,
+                             fallback_models=[m.strip() for m in settings.OPENROUTER_FALLBACK_MODELS.split(",") if m.strip()],
+                             scan_id=scan_id)
 
     try:
         # Auth login session

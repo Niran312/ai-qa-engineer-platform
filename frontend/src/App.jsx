@@ -3,7 +3,7 @@ import { Bot, Plus, Network, LayoutGrid, FileText, Terminal, CheckCircle2, Alert
 import Dashboard from './components/Dashboard';
 import CrawlerMap from './components/CrawlerMap';
 import TestCaseTable from './components/TestCaseTable';
-import { apiFetch, resolveAssetUrl } from './api';
+import { apiFetch, resolveAssetUrl, getScanDownloadUrl } from './api';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard'); // 'dashboard' | 'scan-details'
@@ -424,7 +424,7 @@ export default function App() {
 
               {scanDetails.excel_path && (
                 <a
-                  href={resolveAssetUrl(`/api/scan/${scanDetails.id}/download`)}
+                  href={getScanDownloadUrl(scanDetails.id)}
                   className="primary-btn"
                   style={{ textDecoration: 'none', background: 'linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%)', boxShadow: '0 4px 15px rgba(124, 58, 237, 0.3)', padding: '0.6rem 1.25rem', fontSize: '0.85rem' }}
                 >
@@ -501,7 +501,7 @@ export default function App() {
 
                   {scanDetails.perf_data?.llm_stage && (
                     <div>
-                      <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', textTransform: 'uppercase', fontWeight: 600 }}>Gemini AI Processing</div>
+                      <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', textTransform: 'uppercase', fontWeight: 600 }}>OpenRouter AI Processing</div>
                       <div style={{ fontSize: '0.8rem', fontWeight: 600, color: '#fb923c' }}>{scanDetails.perf_data.llm_stage}</div>
                       <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                         AI Elapsed: <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-main)' }}>{formatTime(liveTimers.llmElapsed)}</span>
@@ -639,7 +639,7 @@ export default function App() {
                       </div>
                       
                       <div>
-                        <div style={{ fontWeight: 600, color: 'var(--text-muted)', fontSize: '0.75rem', textTransform: 'uppercase' }}>Gemini AI Processing</div>
+                        <div style={{ fontWeight: 600, color: 'var(--text-muted)', fontSize: '0.75rem', textTransform: 'uppercase' }}>OpenRouter AI Processing</div>
                         <div style={{ fontSize: '1.05rem', fontWeight: 800, color: '#fb923c', marginTop: '4px' }}>
                           {scanDetails.perf_data.final_summary.llm?.calls || 0} LLM calls
                         </div>

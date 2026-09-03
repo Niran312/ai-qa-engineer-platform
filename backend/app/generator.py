@@ -4,7 +4,7 @@ import urllib.parse
 import pandas as pd
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
-import google.generativeai as genai
+from .ai_provider import OpenRouterModel
 from .config import settings
 from .database import add_scan_log, track_llm_call
 from .schemas import ScopeContext
@@ -13,7 +13,7 @@ from typing import Optional
 
 # Per-feature-type templates for the structural mock generator, keyed to the same feature
 # types produced by derive_features_from_elements() so the fallback path (which runs whenever
-# Gemini is unavailable or a stage fails) still covers every discovered element category, not
+# the AI provider is unavailable or a stage fails) still covers every discovered element category, not
 # just forms/buttons.
 MOCK_TYPE_TEMPLATES = {
     "Create": {"priority": "High", "scenario": "Verify submitting {feat} with structural inputs",
@@ -88,7 +88,7 @@ def log_pipeline(scan_id: str, scope_ctx: Optional[ScopeContext], tag: str, mess
 
 def get_mock_test_cases(app_map: dict = None, scope_ctx: ScopeContext = None) -> list:
     """
-    Generates dynamic structural mock test cases conforming to the final schema when Gemini is not configured.
+    Generates dynamic structural mock test cases conforming to the final schema when no AI provider is configured.
     It derives test cases dynamically from the app_map nodes matching the selected scope, ensuring no hardcoded EMS leaks.
     """
     nodes = app_map.get("nodes", []) if app_map else []
@@ -193,7 +193,7 @@ def get_mock_test_cases(app_map: dict = None, scope_ctx: ScopeContext = None) ->
 
 def query_llm(model, prompt: str, scan_id: str, stage_name: str) -> str:
     """Helper to query the configured generative model with logs."""
-    add_scan_log(scan_id, f"[GENERATOR] [{stage_name}] Dispatching reasoning task to Gemini...")
+    add_scan_log(scan_id, f"[GENERATOR] [{stage_name}] Dispatching reasoning task to AI provider...")
     try:
         with track_llm_call(scan_id, stage_name):
             response = model.generate_content(prompt)
@@ -266,14 +266,14 @@ def run_quality_gate(model, test_cases: list, scan_id: str, scope_ctx: ScopeCont
 
 def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_key: str = None, 
                         model_name: str = None, mcp_behavior: str = None, scope_ctx: ScopeContext = None) -> list:
-    """Invokes the multi-stage E2E QA reasoning pipeline using Gemini and structured MCP behavioral data."""
+    """Invokes the multi-stage E2E QA reasoning pipeline using OpenRouter and structured MCP behavioral data."""
     log_pipeline(scan_id, scope_ctx, "GENERATOR", "Ingesting Structured Behavioral Discovery Data...")
 
     scan_scope_str = scope_ctx.scan_scope if scope_ctx else "entire"
 
-    gen_key = api_key or settings.GEMINI_API_KEY
+    gen_key = api_key or settings.OPENROUTER_API_KEY
     if not gen_key:
-        log_pipeline(scan_id, scope_ctx, "GENERATOR", "[WARNING] No GEMINI_API_KEY provided. Generating mock test cases...")
+        log_pipeline(scan_id, scope_ctx, "GENERATOR", "[WARNING] No OPENROUTER_API_KEY provided. Generating mock test cases...")
         mock_cases = get_mock_test_cases(app_map, scope_ctx)
         
         total_modules = len(set(tc.get("module", "") for tc in mock_cases))
@@ -374,10 +374,10 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
             add_scan_log(scan_id, f"[WARNING] Failed to parse structured behavior telemetry: {e}")
 
     try:
-        genai.configure(api_key=gen_key)
-        selected_model = model_name or "gemini-1.5-flash"
-        model = genai.GenerativeModel(selected_model)
-        
+        model = OpenRouterModel(api_key=gen_key, model_name=settings.OPENROUTER_PRIMARY_MODEL,
+                                 fallback_models=[m.strip() for m in settings.OPENROUTER_FALLBACK_MODELS.split(",") if m.strip()],
+                                 scan_id=scan_id)
+
         crawled_nodes = app_map.get("nodes", [])
         crawled_edges = app_map.get("edges", [])
 
@@ -456,7 +456,7 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
         add_scan_log(scan_id, "[GENERATOR] [STAGE 2] Performing deep Behavior Analysis & Scenario Matrices...")
         all_scenario_matrices = []
         for module in inventory_data.get("module_inventory", []):
-            # Stage 1's module_inventory is free-form Gemini JSON, not schema-validated - don't
+            # Stage 1's module_inventory is free-form AI-generated JSON, not schema-validated - don't
             # trust it to always use the exact key name we asked for.
             module_name = module.get("module_name") or module.get("name") or "Unnamed Module"
             module_pages_elements = []

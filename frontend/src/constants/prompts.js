@@ -61,7 +61,7 @@ Do NOT assume a feature exists merely because:
 - a name attribute exists
 - a common UI pattern exists
 - the feature is common in other applications
-- Gemini expects such a feature
+- the AI model expects such a feature
 
 ==================================================
 3. BEHAVIORAL EVIDENCE CLASSIFICATION

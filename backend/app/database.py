@@ -31,15 +31,22 @@ def init_db():
         cursor.execute("ALTER TABLE scans ADD COLUMN perf_data TEXT")
     except sqlite3.OperationalError:
         pass
+    # Add client_id column if it does not exist. Legacy rows get NULL, which never matches a
+    # real client UUID in the filtered queries below - they become inaccessible via the API
+    # (not deleted) rather than suddenly visible to whichever browser reloads next.
+    try:
+        cursor.execute("ALTER TABLE scans ADD COLUMN client_id TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
 
-def create_scan(scan_id: str, url: str, description: str):
+def create_scan(scan_id: str, url: str, description: str, client_id: str):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO scans (id, url, description, status, progress_log, app_map, test_cases, perf_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (scan_id, url, description, "pending", json.dumps([]), json.dumps({"nodes": [], "edges": []}), json.dumps([]), json.dumps({}))
+        "INSERT INTO scans (id, url, description, status, progress_log, app_map, test_cases, perf_data, client_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (scan_id, url, description, "pending", json.dumps([]), json.dumps({"nodes": [], "edges": []}), json.dumps([]), json.dumps({}), client_id)
     )
     conn.commit()
     conn.close()
@@ -137,20 +144,28 @@ def save_completed_stage_dur(scan_id: str, stage_name: str, duration: float):
         "stages_completed": stages
     })
 
-def get_scan(scan_id: str):
+def get_scan(scan_id: str, client_id: str = None):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM scans WHERE id = ?", (scan_id,))
+    if client_id is not None:
+        # A single combined WHERE - "exists but belongs to someone else" and "doesn't exist"
+        # both return None, so callers can't distinguish the two (no existence leak).
+        cursor.execute("SELECT * FROM scans WHERE id = ? AND client_id = ?", (scan_id, client_id))
+    else:
+        cursor.execute("SELECT * FROM scans WHERE id = ?", (scan_id,))
     row = cursor.fetchone()
     conn.close()
     if row:
         return dict(row)
     return None
 
-def get_all_scans():
+def get_all_scans(client_id: str):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, url, description, status, excel_path, created_at FROM scans ORDER BY created_at DESC")
+    cursor.execute(
+        "SELECT id, url, description, status, excel_path, created_at FROM scans WHERE client_id = ? ORDER BY created_at DESC",
+        (client_id,)
+    )
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]

@@ -5,7 +5,6 @@ import urllib.parse
 from playwright.async_api import async_playwright
 from .config import settings
 from .database import add_scan_log, update_scan_data, update_scan_status, update_scan_perf_data
-import google.generativeai as genai
 import json
 from .schemas import ScopeContext
 from typing import Optional
@@ -21,15 +20,17 @@ def log_pipeline(scan_id: str, scope_ctx: Optional[ScopeContext], tag: str, mess
     prefix = f"[{tag}] [scan_id={scan_id}] [scope={scope}] [parent={parent}] [selected={selected}]"
     add_scan_log(scan_id, f"{prefix} {message}")
 
-def get_gemini_selectors(html_snippet: str, api_key: str = None, scan_id: str = None) -> dict:
-    """Helper to extract login selectors using Gemini if key is present."""
-    gen_key = api_key or settings.GEMINI_API_KEY
+def get_ai_login_selectors(html_snippet: str, api_key: str = None, scan_id: str = None) -> dict:
+    """Helper to extract login selectors using the configured AI provider, if a key is present."""
+    gen_key = api_key or settings.OPENROUTER_API_KEY
     if not gen_key:
         return {}
     try:
         from .database import track_llm_call
-        genai.configure(api_key=gen_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        from .ai_provider import OpenRouterModel
+        model = OpenRouterModel(api_key=gen_key, model_name=settings.OPENROUTER_PRIMARY_MODEL,
+                                 fallback_models=[m.strip() for m in settings.OPENROUTER_FALLBACK_MODELS.split(",") if m.strip()],
+                                 scan_id=scan_id)
         prompt = f"""
         Analyze the following HTML elements extracted from a login page:
         ```html
@@ -54,7 +55,7 @@ def get_gemini_selectors(html_snippet: str, api_key: str = None, scan_id: str = 
             text = text.split("```")[1].split("```")[0]
         return json.loads(text.strip())
     except Exception as e:
-        print(f"[CRAWLER] Gemini selector extraction failed: {e}")
+        print(f"[CRAWLER] AI selector extraction failed: {e}")
         return {}
 
 async def run_heuristics_login_selectors(page) -> tuple:
@@ -508,7 +509,7 @@ async def crawl_site(scan_id: str, start_url: str, username: str = None, passwor
                 form_html = await page.evaluate(
                     "() => Array.from(document.querySelectorAll('form, input, button')).map(el => el.outerHTML).join('\\n')"
                 )
-                ai_selectors = get_gemini_selectors(form_html[:40000], api_key=api_key, scan_id=scan_id)
+                ai_selectors = get_ai_login_selectors(form_html[:40000], api_key=api_key, scan_id=scan_id)
                 u_sel = ai_selectors.get("username_selector")
                 p_sel = ai_selectors.get("password_selector")
                 s_sel = ai_selectors.get("submit_selector")

@@ -37,8 +37,7 @@ export default function Dashboard({onSubmit, loading}) {
     const [showAuth, setShowAuth] = useState(false);
     const [hasUserEditedInstructions, setHasUserEditedInstructions] = useState(false);
     const [apiKey, setApiKey] = useState('');
-    const [modelName, setModelName] = useState('gemini-1.5-flash');
-    const [showGemini, setShowGemini] = useState(false);
+    const [showAiSettings, setShowAiSettings] = useState(false);
     const [scanScope, setScanScope] = useState('');
     const [parentModule, setParentModule] = useState('');
     const [selectedModule, setSelectedModule] = useState('');
@@ -121,8 +120,7 @@ export default function Dashboard({onSubmit, loading}) {
             username: username.trim() || null,
             password: password || null,
             description: description.trim() || null,
-            api_key: apiKey.trim() || null,
-            model_name: modelName || null,
+            openrouter_api_key: apiKey.trim() || null,
             scan_scope: scanScope || null,
             parent_module: scanScope === 'module' ? parentModule.trim() : null,
             selected_module: scanScope === 'module' ? selectedModule.trim() : null,
@@ -203,40 +201,27 @@ export default function Dashboard({onSubmit, loading}) {
                     )}
                 </div>
 
-                {/* Gemini Settings Toggler */}
+                {/* OpenRouter Settings Toggler */}
                 <div className="form-group span-2">
-                    <div className="auth-header-toggle" onClick={() => setShowGemini(!showGemini)}>
+                    <div className="auth-header-toggle" onClick={() => setShowAiSettings(!showAiSettings)}>
                         <Bot className="menu-icon"
-                             style={{color: showGemini ? 'var(--secondary)' : 'var(--text-muted)'}}/>
-                        <span>Gemini AI Settings (Optional)</span>
-                        {showGemini ? <ChevronUp size={16}/> : <ChevronDown size={16}/>}
+                             style={{color: showAiSettings ? 'var(--secondary)' : 'var(--text-muted)'}}/>
+                        <span>OpenRouter AI Settings (Optional)</span>
+                        {showAiSettings ? <ChevronUp size={16}/> : <ChevronDown size={16}/>}
                     </div>
 
-                    {showGemini && (
+                    {showAiSettings && (
                         <div className="auth-block">
                             <div className="form-group">
-                                <label className="form-label" htmlFor="api-key-input">Gemini API Key</label>
+                                <label className="form-label" htmlFor="api-key-input">OpenRouter API Key</label>
                                 <input
                                     id="api-key-input"
                                     type="password"
                                     className="form-input"
-                                    placeholder="AIzaSy..."
+                                    placeholder="sk-or-v1-..."
                                     value={apiKey}
                                     onChange={(e) => setApiKey(e.target.value)}
                                     disabled={loading}
-                                />
-                            </div>
-                            <div className="form-group">
-                                <label className="form-label" htmlFor="model-select">Gemini Model</label>
-                                <input
-                                    id="gemini-model-id"
-                                    type="text"
-                                    className="form-input"
-                                    placeholder="Enter Gemini model name - eg : gemini-3.1-flash-lite"
-                                    value={modelName}
-                                    onChange={(e) => setModelName(e.target.value.trim())}
-                                    disabled={loading}
-                                    autoComplete="off"
                                 />
                             </div>
                         </div>

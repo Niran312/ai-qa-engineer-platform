@@ -2,7 +2,7 @@ import os
 import uuid
 import json
 import asyncio
-from fastapi import FastAPI, BackgroundTasks, HTTPException, status, Response
+from fastapi import FastAPI, BackgroundTasks, HTTPException, status, Response, Header, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -27,6 +27,25 @@ def log_pipeline(scan_id: str, scope_ctx: Optional[ScopeContext], tag: str, mess
     prefix = f"[{tag}] [scan_id={scan_id}] [scope={scope}] [parent={parent}] [selected={selected}]"
     from .database import add_scan_log
     add_scan_log(scan_id, f"{prefix} {message}")
+
+
+def resolve_client_id(
+    x_client_id: Optional[str] = Header(None, alias="X-Client-ID"),
+    client_id: Optional[str] = Query(None),
+) -> str:
+    """Anonymous browser/client isolation, not authentication - the caller self-asserts a
+    UUID it generated and persisted in localStorage. The header is used for normal fetch()
+    calls; the query param exists only because the Excel download is a plain browser
+    navigation (window.open / <a href>) that cannot set custom headers. Both carry identical
+    trust semantics since neither is a server-issued secret."""
+    raw = x_client_id or client_id
+    if not raw:
+        raise HTTPException(status_code=400, detail="Missing client identity (X-Client-ID header)")
+    try:
+        uuid.UUID(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid client identity format")
+    return raw
 
 
 app = FastAPI(title="AI QA Engineer Platform API", version="1.0")
@@ -322,7 +341,7 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
         add_scan_log(scan_id, f"Navigation:                  {nav_dur:.2f}s")
         add_scan_log(scan_id, f"Initial Snapshot:             {snapshot_dur:.2f}s")
         add_scan_log(scan_id, f"Behavior Exploration:        {exploration_dur:.2f}s")
-        add_scan_log(scan_id, f"Gemini Requests:              {llm_dur:.2f}s")
+        add_scan_log(scan_id, f"AI Requests:                  {llm_dur:.2f}s")
         add_scan_log(scan_id, f"MCP Shutdown:                 {shutdown_dur:.2f}s")
         add_scan_log(scan_id, "")
         add_scan_log(scan_id, f"Total MCP Time:              {total_mcp_time:.2f}s")
@@ -347,7 +366,7 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
 
         # Bottleneck detection
         durations = {
-            "Gemini behavioral reasoning": llm_dur,
+            "AI behavioral reasoning": llm_dur,
             "Browser Launch": browser_launch_dur,
             "Page Navigation": nav_dur,
             "Page Snapshot": snapshot_dur,
@@ -401,9 +420,9 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
 
 
 @app.post("/api/scan", response_model=dict, status_code=status.HTTP_201_CREATED)
-async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
+async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks, client_id: str = Depends(resolve_client_id)):
     scan_id = str(uuid.uuid4())
-    create_scan(scan_id, str(request.url), request.description)
+    create_scan(scan_id, str(request.url), request.description, client_id)
 
     scope_ctx = ScopeContext(
         scan_scope=request.scan_scope or "entire",
@@ -425,8 +444,8 @@ async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         request.username,
         request.password,
         request.description,
-        request.api_key,
-        request.model_name,
+        request.openrouter_api_key,
+        None,
         scope_ctx
     )
 
@@ -442,12 +461,12 @@ async def health_check():
 
 
 @app.get("/api/scan/{scan_id}", response_model=ScanResponse)
-def get_scan_status(scan_id: str, response: Response):
+def get_scan_status(scan_id: str, response: Response, client_id: str = Depends(resolve_client_id)):
     response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
 
-    scan = get_scan(scan_id)
+    scan = get_scan(scan_id, client_id)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan job not found")
 
@@ -473,17 +492,17 @@ def get_scan_status(scan_id: str, response: Response):
 
 
 @app.get("/api/scans", response_model=list[ScanHistoryItem])
-def list_scans(response: Response):
+def list_scans(response: Response, client_id: str = Depends(resolve_client_id)):
     response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
 
-    return get_all_scans()
+    return get_all_scans(client_id)
 
 
 @app.get("/api/scan/{scan_id}/download")
-def download_excel(scan_id: str):
-    scan = get_scan(scan_id)
+def download_excel(scan_id: str, client_id: str = Depends(resolve_client_id)):
+    scan = get_scan(scan_id, client_id)
     if not scan or not scan["excel_path"]:
         raise HTTPException(status_code=404, detail="Excel report not found or scan is not completed")
 

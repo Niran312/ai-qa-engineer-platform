@@ -6,8 +6,7 @@ class ScanRequest(BaseModel):
     username: Optional[str] = None
     password: Optional[str] = None
     description: Optional[str] = None
-    api_key: Optional[str] = None
-    model_name: Optional[str] = None
+    openrouter_api_key: Optional[str] = None
     scan_scope: Optional[str] = None
     parent_module: Optional[str] = None
     selected_module: Optional[str] = None
