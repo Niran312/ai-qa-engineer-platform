@@ -440,6 +440,17 @@ function CrawlerMapContent({ appMap, onNodeSelect }) {
     }
   };
 
+  // Escapes the 5 XML predefined entities so arbitrary crawled text (page titles, URLs/query
+  // strings, button labels, etc.) can never break the exported SVG's XML structure. Order
+  // matters: '&' must be escaped first, or the '&' introduced by escaping '<'/'>'/etc. would
+  // itself get re-escaped into '&amp;lt;' style double-encoding.
+  const escapeXml = (value) => String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+
   // Export Map to vector SVG format
   const handleExportSvg = () => {
     if (!nodes.length) return;
@@ -538,13 +549,15 @@ function CrawlerMapContent({ appMap, onNodeSelect }) {
       // Card Container
       svgStr += `<rect width="${cardW}" height="${cardH}" class="node-box ${borderClass}"/>`;
       // Title
-      svgStr += `<text x="15" y="30" class="text-lbl">${label.length > 22 ? label.slice(0, 20) + "..." : label}</text>`;
+      const displayLabel = label.length > 22 ? label.slice(0, 20) + "..." : label;
+      svgStr += `<text x="15" y="30" class="text-lbl">${escapeXml(displayLabel)}</text>`;
       // Path
       const pathStr = url.replace(/^https?:\/\/[^\/]+/, '') || '/';
-      svgStr += `<text x="15" y="55" class="text-url">${pathStr.length > 30 ? pathStr.slice(0, 27) + "..." : pathStr}</text>`;
+      const displayPath = pathStr.length > 30 ? pathStr.slice(0, 27) + "..." : pathStr;
+      svgStr += `<text x="15" y="55" class="text-url">${escapeXml(displayPath)}</text>`;
       // Stats/Badge Footer
       svgStr += `<rect x="15" y="75" width="80" height="18" class="badge-rect ${badgeClass}"/>`;
-      svgStr += `<text x="23" y="87" class="badge-text ${badgeTextClass}">${badgeTxt}</text>`;
+      svgStr += `<text x="23" y="87" class="badge-text ${badgeTextClass}">${escapeXml(badgeTxt)}</text>`;
       svgStr += `</g>`;
     });
 

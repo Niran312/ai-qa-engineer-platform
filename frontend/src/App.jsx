@@ -38,51 +38,64 @@ export default function App() {
     ].join(':');
   };
 
+  // scanDetails is replaced by a new object on every poll response (~every 1.5s). The ticking
+  // interval below must NOT be keyed on scanDetails itself, or it gets torn down and recreated
+  // on every poll - and a freshly-created setInterval doesn't fire its first tick for a full
+  // 1000ms, so the display would only advance when a real 1s gap happened to fall between two
+  // poll-triggered resets (the "frozen, then jumps by several seconds" bug). Instead, a ref
+  // always holds the latest scanDetails for the interval callback to read, while the interval
+  // itself is only (re)created when the scan identity or its running/terminal phase changes.
+  const scanDetailsRef = useRef(scanDetails);
   useEffect(() => {
+    scanDetailsRef.current = scanDetails;
+  }, [scanDetails]);
+
+  const scanPhase = !scanDetails ? null
+    : (scanDetails.status === 'running' || scanDetails.status === 'pending') ? 'active'
+    : scanDetails.status;
+
+  useEffect(() => {
+    const computeElapsed = () => {
+      const perf = scanDetailsRef.current?.perf_data || {};
+      const now = Date.now();
+      return {
+        totalElapsed: perf.started_at ? Math.max(0, Math.floor((now - perf.started_at) / 1000)) : 0,
+        stageElapsed: perf.stage_started_at ? Math.max(0, Math.floor((now - perf.stage_started_at) / 1000)) : 0,
+        featureElapsed: perf.feature_started_at ? Math.max(0, Math.floor((now - perf.feature_started_at) / 1000)) : 0,
+        opElapsed: perf.op_started_at ? Math.max(0, Math.floor((now - perf.op_started_at) / 1000)) : 0,
+        llmElapsed: perf.llm_started_at ? Math.max(0, Math.floor((now - perf.llm_started_at) / 1000)) : 0,
+      };
+    };
+
     let interval = null;
-    if (scanDetails && (scanDetails.status === 'running' || scanDetails.status === 'pending')) {
-      interval = setInterval(() => {
-        const now = Date.now();
-        const perf = scanDetails.perf_data || {};
-        
-        const total = perf.started_at ? Math.max(0, Math.floor((now - perf.started_at) / 1000)) : 0;
-        const stage = perf.stage_started_at ? Math.max(0, Math.floor((now - perf.stage_started_at) / 1000)) : 0;
-        const feat = perf.feature_started_at ? Math.max(0, Math.floor((now - perf.feature_started_at) / 1000)) : 0;
-        const op = perf.op_started_at ? Math.max(0, Math.floor((now - perf.op_started_at) / 1000)) : 0;
-        const llm = perf.llm_started_at ? Math.max(0, Math.floor((now - perf.llm_started_at) / 1000)) : 0;
-        
-        setLiveTimers({
-          totalElapsed: total,
-          stageElapsed: stage,
-          featureElapsed: feat,
-          opElapsed: op,
-          llmElapsed: llm
-        });
-      }, 1000);
+    if (scanPhase === 'active') {
+      // Tick immediately so resuming an already-running scan (e.g. on page reload) shows the
+      // real elapsed time right away instead of waiting up to 1s for the first tick.
+      setLiveTimers(computeElapsed());
+      interval = setInterval(() => setLiveTimers(computeElapsed()), 1000);
+    } else if (scanPhase === 'completed') {
+      const summary = scanDetailsRef.current?.perf_data?.final_summary;
+      setLiveTimers({
+        totalElapsed: Math.floor(summary?.scan?.duration || 0),
+        stageElapsed: 0,
+        featureElapsed: 0,
+        opElapsed: 0,
+        llmElapsed: 0
+      });
+    } else if (scanPhase === 'failed') {
+      // The backend has no recorded failure timestamp, but perf_data.started_at survives the
+      // failure path (perf_data is merged, not replaced) - freeze one final reading from it
+      // instead of resetting to zero, so the final duration is still backend-timestamp-derived.
+      const final = computeElapsed();
+      setLiveTimers({ ...final, stageElapsed: 0, featureElapsed: 0, opElapsed: 0, llmElapsed: 0 });
     } else {
-      if (scanDetails && scanDetails.status === 'completed' && scanDetails.perf_data?.final_summary) {
-        const summary = scanDetails.perf_data.final_summary;
-        setLiveTimers({
-          totalElapsed: Math.floor(summary.scan?.duration || 0),
-          stageElapsed: 0,
-          featureElapsed: 0,
-          opElapsed: 0,
-          llmElapsed: 0
-        });
-      } else {
-        setLiveTimers({
-          totalElapsed: 0,
-          stageElapsed: 0,
-          featureElapsed: 0,
-          opElapsed: 0,
-          llmElapsed: 0
-        });
-      }
+      setLiveTimers({ totalElapsed: 0, stageElapsed: 0, featureElapsed: 0, opElapsed: 0, llmElapsed: 0 });
     }
+
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [scanDetails]);
+  }, [selectedScanId, scanPhase]);
 
   const parseMcpProgress = (logs) => {
     if (!logs) return [];
