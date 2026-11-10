@@ -5,12 +5,18 @@ from mcp.client.stdio import stdio_client
 from ..config import settings
 from ..database import add_scan_log, update_scan_perf_data, save_completed_stage_dur
 
+PLAYWRIGHT_MCP_VERSION = "0.0.84"
+
+
 class PlaywrightMCPClient:
     """Standard client manager to interface with the Node-based @playwright/mcp server using Node 20."""
     
     def __init__(self, storage_state_path: str = None):
         # Dynamically launch using Node 20 and pass headless execution parameters to avoid hangs in server environments
-        args = ["-y", "-p", "node@20", "-p", "@playwright/mcp@latest", "playwright-mcp", "--headless", "--no-sandbox", "--isolated"]
+        # Pinned (not @latest) so a new upstream release can't silently change tool schemas or
+        # behavior between scans - tool argument names have already changed across versions
+        # (e.g. browser_type/browser_click: `ref` in 0.0.70 -> `target` in 0.0.84).
+        args = ["-y", "-p", "node@20", "-p", f"@playwright/mcp@{PLAYWRIGHT_MCP_VERSION}", "playwright-mcp", "--headless", "--no-sandbox", "--isolated"]
         if storage_state_path:
             # Reuse the crawler's already-authenticated session (cookies/localStorage) instead
             # of the MCP browser having to run its own from-scratch login flow.
