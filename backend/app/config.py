@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # OpenRouter (OpenAI-compatible) AI provider settings.
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
-    OPENROUTER_PRIMARY_MODEL: str = os.getenv("OPENROUTER_PRIMARY_MODEL", "z-ai/glm-4.5-flash")
+    OPENROUTER_PRIMARY_MODEL: str = os.getenv("OPENROUTER_PRIMARY_MODEL", "z-ai/glm-5.2:free")
     # Comma-separated list, tried in order only if the primary model fails. Empty by default -
     # a primary-model failure is reported as a clear error rather than silently falling back
     # to a different (possibly paid) model.

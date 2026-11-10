@@ -75,6 +75,34 @@ def is_structural_noise_scenario(scenario: str) -> bool:
     s = (scenario or "").lower()
     return any(phrase in s for phrase in _STRUCTURAL_NOISE_PHRASES)
 
+# Every model-generated test case must end up with exactly these keys so it can flow straight
+# into export_to_excel()'s columns. Without an explicit schema in the prompt, different models
+# invent their own field names (e.g. "title"/"description"/"steps"/"expected_results" instead
+# of "scenario"/"test_steps"/"expected_result") - the JSON parses fine and the pipeline never
+# raises, but the resulting Excel rows end up with the real content in the wrong (unrecognized)
+# keys and blank in the columns that matter. This is injected into every prompt that asks a
+# model to emit final test-case objects (Stage 4, Stage 4 E2E, Stage 5 gap-filling).
+TEST_CASE_JSON_SCHEMA_INSTRUCTIONS = """
+Each test case in the returned JSON list must be an object with EXACTLY these string keys
+(all values as plain strings, not nested objects/lists - join multi-step content into a single
+string with "\\n" between steps):
+- "module": the module/section name
+- "submodule": the submodule name (repeat module if there is no finer submodule)
+- "page": the page name this test case applies to
+- "feature": the feature name being tested
+- "scenario": a specific, one-sentence description of what is being verified
+- "test_type": one of "Smoke", "Functional", "Negative", "Boundary", "Validation"
+- "priority": one of "High", "Medium", "Low"
+- "preconditions": setup required before executing this test case
+- "test_data": input data used, or "None"
+- "test_steps": numbered steps as a single string, e.g. "1. ...\\n2. ...\\n3. ..."
+- "expected_result": the single expected outcome after executing the steps
+- "business_rule": the business rule or requirement this test case validates
+- "dependencies": anything this test case depends on, or "None"
+Do not use any other key names (e.g. never "title", "description", "steps", or
+"expected_results" in place of the keys above) and do not omit any of them.
+"""
+
 def log_pipeline(scan_id: str, scope_ctx: Optional[ScopeContext], tag: str, message: str):
     scope = "unknown"
     parent = "None"
@@ -85,6 +113,19 @@ def log_pipeline(scan_id: str, scope_ctx: Optional[ScopeContext], tag: str, mess
         selected = scope_ctx.selected_module or "None"
     prefix = f"[{tag}] [scan_id={scan_id}] [scope={scope}] [parent={parent}] [selected={selected}]"
     add_scan_log(scan_id, f"{prefix} {message}")
+
+def log_llm_event(scan_id: str, **fields):
+    """Structured, grep-able diagnostic block for the AI generation path. Never pass an api_key
+    or Authorization header in fields - only booleans/counts/model names/error text."""
+    add_scan_log(scan_id, "[LLM-GENERATION]")
+    for key, value in fields.items():
+        add_scan_log(scan_id, f"{key}={value}")
+
+def log_fallback_event(scan_id: str, **fields):
+    """Structured diagnostic block whenever the deterministic structural fallback is used."""
+    add_scan_log(scan_id, "[GENERATOR-FALLBACK]")
+    for key, value in fields.items():
+        add_scan_log(scan_id, f"{key}={value}")
 
 def get_mock_test_cases(app_map: dict = None, scope_ctx: ScopeContext = None) -> list:
     """
@@ -138,7 +179,8 @@ def get_mock_test_cases(app_map: dict = None, scope_ctx: ScopeContext = None) ->
             "observed_behavior": "STRUCTURAL_EVIDENCE",
             "automation_candidate": "Yes",
             "automation_selector": "",
-            "execution_engine": "NONE"
+            "execution_engine": "NONE",
+            "generation_source": "STRUCTURAL_FALLBACK"
         })
         tc_counter += 1
 
@@ -183,7 +225,8 @@ def get_mock_test_cases(app_map: dict = None, scope_ctx: ScopeContext = None) ->
                 "observed_behavior": "STRUCTURAL_EVIDENCE",
                 "automation_candidate": "Yes",
                 "automation_selector": feat.get("locator_hint", ""),
-                "execution_engine": "NONE"
+                "execution_engine": "NONE",
+                "generation_source": "STRUCTURAL_FALLBACK"
             })
             tc_counter += 1
 
@@ -274,7 +317,9 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
     gen_key = api_key or settings.OPENROUTER_API_KEY
     if not gen_key:
         log_pipeline(scan_id, scope_ctx, "GENERATOR", "[WARNING] No OPENROUTER_API_KEY provided. Generating mock test cases...")
+        log_llm_event(scan_id, provider="OpenRouter", api_key_present=False, status="SKIPPED")
         mock_cases = get_mock_test_cases(app_map, scope_ctx)
+        log_fallback_event(scan_id, reason="no_api_key", source="STRUCTURAL_EVIDENCE", cases=len(mock_cases))
         
         total_modules = len(set(tc.get("module", "") for tc in mock_cases))
         total_pages = len(set(tc.get("page", "") for tc in mock_cases))
@@ -373,6 +418,9 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
         except Exception as e:
             add_scan_log(scan_id, f"[WARNING] Failed to parse structured behavior telemetry: {e}")
 
+    log_llm_event(scan_id, provider="OpenRouter", model=settings.OPENROUTER_PRIMARY_MODEL,
+                  api_key_present=True, status="STARTED")
+
     try:
         model = OpenRouterModel(api_key=gen_key, model_name=settings.OPENROUTER_PRIMARY_MODEL,
                                  fallback_models=[m.strip() for m in settings.OPENROUTER_FALLBACK_MODELS.split(",") if m.strip()],
@@ -430,11 +478,19 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
         Return ONLY a JSON object matching the schema.
         """
 
-        stage1_res = query_llm(model, stage1_prompt, scan_id, "STAGE 1: Map & Inventory")
+        # The query_llm() call itself must be inside this try, not just the json.loads() below -
+        # query_llm() deliberately re-raises on any provider failure (auth, rate limit,
+        # context-length, timeout, malformed response), and previously that exception escaped
+        # this stage entirely, propagating to the outer handler and discarding the ENTIRE AI
+        # pipeline (Stages 2-8) in favor of the full structural mock generator - producing a
+        # dataset indistinguishable from the no-API-key path. Every other stage already catches
+        # its own query_llm() call locally; Stage 1 must too, so a single-stage failure only
+        # degrades Stage 1's inventory while leaving Stages 2+ free to still call OpenRouter.
         try:
+            stage1_res = query_llm(model, stage1_prompt, scan_id, "STAGE 1: Map & Inventory")
             inventory_data = json.loads(stage1_res)
         except Exception as e:
-            add_scan_log(scan_id, f"[WARNING] Failed to parse Stage 1 Map JSON: {e}.")
+            add_scan_log(scan_id, f"[WARNING] Stage 1 OpenRouter call/parse failed: {e}.")
             inventory_data = {"application_map": {"modules": []}, "module_inventory": []}
             for node in crawled_nodes:
                 url_path = urllib.parse.urlparse(node["url"]).path or "/"
@@ -562,7 +618,8 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
                     MODULE: {m_name}
                     FEATURE: {f_name}
                     SCENARIOS: {json.dumps(batch, indent=2)}
-                    Return ONLY JSON list of test cases.
+                    {TEST_CASE_JSON_SCHEMA_INSTRUCTIONS}
+                    Return ONLY a JSON list of test case objects matching that schema.
                     """
                     try:
                         stage4_res = query_llm(model, stage4_prompt, scan_id, f"STAGE 4: Test Cases - {f_name}")
@@ -579,8 +636,9 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
             for workflow in e2e_workflows:
                 wf_name = workflow.get("workflow_name") or workflow.get("name") or "Workflow"
                 stage4_e2e_prompt = f"""
-                Generate E2E case for: {wf_name}
-                Return ONLY JSON.
+                Generate an end-to-end test case for the workflow: {wf_name}
+                {TEST_CASE_JSON_SCHEMA_INSTRUCTIONS}
+                Return ONLY a JSON list containing one test case object matching that schema.
                 """
                 try:
                     stage4_e2e_res = query_llm(model, stage4_e2e_prompt, scan_id, f"STAGE 4: E2E - {wf_name}")
@@ -620,7 +678,8 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
                 
                 gap_prompt = f"""
                 Generate test cases for feature '{f_name}' in module '{m_name}'.
-                Return ONLY JSON list.
+                {TEST_CASE_JSON_SCHEMA_INSTRUCTIONS}
+                Return ONLY a JSON list of test case objects matching that schema.
                 """
                 try:
                     gap_res = query_llm(model, gap_prompt, scan_id, f"STAGE 5: Auditor Gap - {f_name}")
@@ -633,6 +692,22 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
                         generated_test_cases.append(gc)
                 except Exception as e:
                     add_scan_log(scan_id, f"[WARNING] Gap generation failed: {e}")
+
+        # OpenRouter can return HTTP 200 with content that never parses as valid JSON at every
+        # single stage (no exception raised anywhere, since each stage already catches its own
+        # json.loads failure) - without this check that degrades silently to zero test cases
+        # instead of a usable result. Checked here (pre-Quality-Gate, pre-MODULE-scope-filter)
+        # so a legitimate empty result from strict module scoping later is never misread as a
+        # generation failure.
+        if not generated_test_cases:
+            log_pipeline(scan_id, scope_ctx, "GENERATOR",
+                         "[WARNING] AI pipeline completed with no exception but produced zero usable test cases "
+                         "(every OpenRouter response was empty/unparseable). Falling back to structural generator.")
+            log_llm_event(scan_id, provider="OpenRouter", model=settings.OPENROUTER_PRIMARY_MODEL,
+                          status="FAILED", error="AI pipeline completed but produced zero parseable test cases")
+            mock_cases = get_mock_test_cases(app_map, scope_ctx)
+            log_fallback_event(scan_id, reason="empty_ai_output", source="STRUCTURAL_EVIDENCE", cases=len(mock_cases))
+            return mock_cases
 
         # --- STAGE 6: Quality Gate rewriting pass ---
         raw_test_cases = run_quality_gate(model, generated_test_cases, scan_id, scope_ctx=scope_ctx)
@@ -686,6 +761,12 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
                     execution_engine = engine
                     break
             tc["execution_engine"] = execution_engine
+
+            # Marks this case as having come from the real OpenRouter-driven pipeline, distinct
+            # from get_mock_test_cases()'s "STRUCTURAL_FALLBACK" - independent of
+            # observed_behavior/execution_engine, which track BEHAVIORAL evidence (MCP/Playwright
+            # Core/none), a different axis than "was this scenario authored by the AI."
+            tc["generation_source"] = "AI_GENERATED"
 
             final_test_cases.append(tc)
 
@@ -756,11 +837,17 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
             log_pipeline(scan_id, scope_ctx, "GENERATOR", f" {mod} | {feat} | {obs} | {struct} | {inf} | {skip} | {feat_pct}% ")
         log_pipeline(scan_id, scope_ctx, "GENERATOR", "=======================================================================================")
 
+        log_llm_event(scan_id, provider="OpenRouter", model=settings.OPENROUTER_PRIMARY_MODEL,
+                      status="SUCCESS", generated_cases=len(final_test_cases))
         return final_test_cases
-        
+
     except Exception as e:
         log_pipeline(scan_id, scope_ctx, "GENERATOR", f"[ERROR] Failed during AI reasoning: {e}. Falling back to mock generator.")
-        return get_mock_test_cases(app_map, scope_ctx)
+        log_llm_event(scan_id, provider="OpenRouter", model=settings.OPENROUTER_PRIMARY_MODEL,
+                      status="FAILED", error=str(e))
+        mock_cases = get_mock_test_cases(app_map, scope_ctx)
+        log_fallback_event(scan_id, reason=str(e), source="STRUCTURAL_EVIDENCE", cases=len(mock_cases))
+        return mock_cases
 
 def export_to_excel(test_cases: list, filename: str) -> str:
     """Exports test cases JSON array to a sorted, styled, premium formatted Excel sheet with full telemetry mapping."""
@@ -785,7 +872,8 @@ def export_to_excel(test_cases: list, filename: str) -> str:
         "evidence_reference",
         "automation_candidate",
         "automation_selector",
-        "execution_engine"
+        "execution_engine",
+        "generation_source"
     ]
     for col in cols:
         if col not in df.columns:
@@ -845,7 +933,7 @@ def export_to_excel(test_cases: list, filename: str) -> str:
                 cell.border = thin_border
                 
                 col_name = cols[col_idx - 1]
-                if col_name in ["test_case_id", "priority", "test_type", "automation_candidate", "observed_behavior", "evidence_reference", "execution_engine"]:
+                if col_name in ["test_case_id", "priority", "test_type", "automation_candidate", "observed_behavior", "evidence_reference", "execution_engine", "generation_source"]:
                     cell.alignment = center_align
                 else:
                     cell.alignment = left_align

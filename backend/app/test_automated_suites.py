@@ -4,8 +4,9 @@ import json
 import os
 import sqlite3
 import urllib.parse
+import pandas as pd
 from app.schemas import ScopeContext, ScanRequest
-from app.generator import get_mock_test_cases, generate_test_cases, is_structural_noise_scenario
+from app.generator import get_mock_test_cases, generate_test_cases, is_structural_noise_scenario, export_to_excel
 from app.mcp_explorer import run_mcp_discovery, derive_features_from_elements
 from app.config import settings, Settings
 from app.ai_provider import OpenRouterModel, AIProviderError
@@ -760,7 +761,7 @@ class TestOpenRouterConfig(unittest.TestCase):
 
     def test_primary_model_defaults_to_glm_flash(self):
         s = Settings(_env_file=None)
-        self.assertEqual(s.OPENROUTER_PRIMARY_MODEL, "z-ai/glm-4.5-flash")
+        self.assertEqual(s.OPENROUTER_PRIMARY_MODEL, "z-ai/glm-5.2:free")
 
     def test_fallback_models_default_empty(self):
         s = Settings(_env_file=None)
@@ -985,6 +986,187 @@ class TestScanClientIsolation(unittest.TestCase):
         new_scan_id = resp.json()["scan_id"]
         self.assertIsNotNone(get_scan(new_scan_id, self.client_a))
         self.assertIsNone(get_scan(new_scan_id, self.client_b))
+
+
+class TestGenerationDataFlow(unittest.TestCase):
+    """Regression suite for the OpenRouter-vs-fallback data-flow bug: a Stage 1 OpenRouter
+    failure was not caught locally (query_llm() sat outside its own try/except), so it
+    propagated to generate_test_cases()'s outer handler and silently discarded the entire
+    AI pipeline in favor of get_mock_test_cases() - producing output indistinguishable from
+    the no-API-key path. All LLM calls are mocked; no real OpenRouter credits are used."""
+
+    def setUp(self):
+        self.app_map = {
+            "nodes": [{
+                "id": "http://example.com/dashboard",
+                "label": "Dashboard",
+                "url": "http://example.com/dashboard",
+                "elements": {
+                    "forms": [{"name": "search-form", "fields": [{"name": "q", "type": "text"}]}],
+                    "buttons": [{"text": "Add Item"}],
+                },
+            }],
+            "edges": [],
+        }
+        self.scope_ctx = ScopeContext(scan_scope="entire", target_urls=[], allowed_features=[])
+
+    @staticmethod
+    def _pass_through_quality_gate(model, test_cases, scan_id, scope_ctx=None):
+        return test_cases
+
+    @staticmethod
+    def _full_success_llm(model, prompt, scan_id, stage_name):
+        if stage_name.startswith("STAGE 1"):
+            return json.dumps({
+                "application_map": {"modules": []},
+                "module_inventory": [{"module_name": "Dashboard", "features": ["Add Item"],
+                                       "fields": [], "states": [], "dependencies": []}]
+            })
+        if stage_name.startswith("STAGE 2"):
+            return json.dumps([{"feature_name": "Add Item",
+                                 "scenarios": ["Verify clicking Add Item opens the create dialog"]}])
+        if stage_name.startswith("STAGE 3"):
+            return json.dumps([])
+        if stage_name.startswith("STAGE 4"):
+            return json.dumps([{
+                "module": "Dashboard", "submodule": "Dashboard", "page": "Dashboard", "feature": "Add Item",
+                "scenario": "AI-AUTHORED: Verify clicking Add Item opens the create dialog",
+                "test_type": "Functional", "priority": "High", "preconditions": "On Dashboard",
+                "test_data": "None", "test_steps": "1. Click Add Item.", "expected_result": "Dialog opens.",
+                "business_rule": "N/A", "dependencies": "None",
+            }])
+        return json.dumps([])
+
+    def test_no_api_key_uses_fallback_generation(self):
+        with unittest.mock.patch.object(settings, "OPENROUTER_API_KEY", ""):
+            result = generate_test_cases("dataflow_no_key", self.app_map, "desc", api_key=None, scope_ctx=self.scope_ctx)
+        self.assertTrue(len(result) > 0)
+        self.assertTrue(all(tc.get("generation_source") == "STRUCTURAL_FALLBACK" for tc in result))
+
+    def test_valid_api_key_actually_invokes_openrouter(self):
+        with unittest.mock.patch("app.generator.query_llm", side_effect=self._full_success_llm) as mock_query, \
+             unittest.mock.patch("app.generator.run_quality_gate", side_effect=self._pass_through_quality_gate):
+            generate_test_cases("dataflow_invoked", self.app_map, "desc", api_key="sk-or-fake-key", scope_ctx=self.scope_ctx)
+        self.assertTrue(mock_query.called, "OpenRouter (query_llm) must actually be called when a key is provided")
+
+    def test_successful_ai_cases_reach_final_collection(self):
+        with unittest.mock.patch("app.generator.query_llm", side_effect=self._full_success_llm), \
+             unittest.mock.patch("app.generator.run_quality_gate", side_effect=self._pass_through_quality_gate):
+            result = generate_test_cases("dataflow_ai_reaches_final", self.app_map, "desc", api_key="sk-or-fake-key", scope_ctx=self.scope_ctx)
+        scenarios = [tc.get("scenario") for tc in result]
+        self.assertIn("AI-AUTHORED: Verify clicking Add Item opens the create dialog", scenarios)
+
+    def test_ai_cases_not_silently_replaced_by_structural_cases(self):
+        with unittest.mock.patch("app.generator.query_llm", side_effect=self._full_success_llm), \
+             unittest.mock.patch("app.generator.run_quality_gate", side_effect=self._pass_through_quality_gate):
+            result = generate_test_cases("dataflow_not_replaced", self.app_map, "desc", api_key="sk-or-fake-key", scope_ctx=self.scope_ctx)
+        fallback = get_mock_test_cases(self.app_map, self.scope_ctx)
+        self.assertNotEqual(result, fallback)
+        self.assertTrue(all(tc.get("generation_source") == "AI_GENERATED" for tc in result))
+
+    def test_stage1_failure_alone_does_not_collapse_entire_pipeline(self):
+        """The exact bug: previously, a Stage 1-only failure (any OpenRouter error - auth,
+        rate limit, context length, timeout) discarded Stages 2-8 entirely and fell back to
+        get_mock_test_cases(), even though later stages could have succeeded independently."""
+        def stage1_fails(model, prompt, scan_id, stage_name):
+            if stage_name.startswith("STAGE 1"):
+                raise RuntimeError("simulated OpenRouter failure on Stage 1 only")
+            return self._full_success_llm(model, prompt, scan_id, stage_name)
+
+        with unittest.mock.patch("app.generator.query_llm", side_effect=stage1_fails), \
+             unittest.mock.patch("app.generator.run_quality_gate", side_effect=self._pass_through_quality_gate):
+            result = generate_test_cases("dataflow_stage1_only_fails", self.app_map, "desc", api_key="sk-or-fake-key", scope_ctx=self.scope_ctx)
+
+        self.assertTrue(any(tc.get("generation_source") == "AI_GENERATED" for tc in result),
+                         "Stages 2+ must still be able to produce AI-generated cases after a Stage 1-only failure")
+
+    def test_openrouter_total_failure_falls_back_and_logs_clearly(self):
+        with unittest.mock.patch("app.generator.query_llm", side_effect=RuntimeError("simulated total OpenRouter outage")), \
+             unittest.mock.patch("app.generator.add_scan_log") as mock_log:
+            result = generate_test_cases("dataflow_total_failure", self.app_map, "desc", api_key="sk-or-fake-key", scope_ctx=self.scope_ctx)
+
+        self.assertTrue(all(tc.get("generation_source") == "STRUCTURAL_FALLBACK" for tc in result))
+        logged_lines = [str(call.args[1]) for call in mock_log.call_args_list]
+        self.assertTrue(any("status=FAILED" in line for line in logged_lines))
+        self.assertTrue(any("simulated total OpenRouter outage" in line for line in logged_lines))
+        self.assertTrue(any(line == "[GENERATOR-FALLBACK]" for line in logged_lines))
+
+    def test_unparseable_openrouter_response_falls_back_and_logs(self):
+        """OpenRouter can return HTTP 200 with content that never parses as valid JSON - no
+        exception is raised anywhere, so without an explicit check this used to silently
+        degrade to zero test cases instead of a usable fallback result."""
+        with unittest.mock.patch("app.generator.query_llm", return_value="not valid json at all"), \
+             unittest.mock.patch("app.generator.add_scan_log") as mock_log:
+            result = generate_test_cases("dataflow_garbage_response", self.app_map, "desc", api_key="sk-or-fake-key", scope_ctx=self.scope_ctx)
+
+        self.assertTrue(len(result) > 0)
+        self.assertTrue(all(tc.get("generation_source") == "STRUCTURAL_FALLBACK" for tc in result))
+        logged_lines = [str(call.args[1]) for call in mock_log.call_args_list]
+        self.assertTrue(any(line == "[GENERATOR-FALLBACK]" for line in logged_lines))
+
+    def test_excel_exporter_receives_final_generated_cases(self):
+        with unittest.mock.patch("app.generator.query_llm", side_effect=self._full_success_llm), \
+             unittest.mock.patch("app.generator.run_quality_gate", side_effect=self._pass_through_quality_gate):
+            result = generate_test_cases("dataflow_excel", self.app_map, "desc", api_key="sk-or-fake-key", scope_ctx=self.scope_ctx)
+
+        excel_path = export_to_excel(result, "dataflow_excel_test.xlsx")
+        try:
+            df = pd.read_excel(excel_path)
+            self.assertEqual(len(df), len(result))
+            self.assertIn("Generation Source", df.columns)
+            self.assertEqual(set(df["Generation Source"]), {"AI_GENERATED"})
+        finally:
+            if os.path.exists(excel_path):
+                os.remove(excel_path)
+
+    def test_ai_generated_cases_retain_source_and_behavior_metadata(self):
+        with unittest.mock.patch("app.generator.query_llm", side_effect=self._full_success_llm), \
+             unittest.mock.patch("app.generator.run_quality_gate", side_effect=self._pass_through_quality_gate):
+            result = generate_test_cases("dataflow_metadata", self.app_map, "desc", api_key="sk-or-fake-key", scope_ctx=self.scope_ctx)
+
+        for tc in result:
+            self.assertEqual(tc.get("generation_source"), "AI_GENERATED")
+            self.assertIn(tc.get("observed_behavior"), {"OBSERVED_BEHAVIOR", "STRUCTURAL_EVIDENCE", "INFERRED_SCENARIO", "SKIPPED_SCENARIO"})
+            self.assertIn("execution_engine", tc)
+
+    def test_ai_path_and_fallback_path_distinguishable_in_final_data(self):
+        with unittest.mock.patch("app.generator.query_llm", side_effect=self._full_success_llm), \
+             unittest.mock.patch("app.generator.run_quality_gate", side_effect=self._pass_through_quality_gate):
+            ai_result = generate_test_cases("dataflow_distinguish_ai", self.app_map, "desc", api_key="sk-or-fake-key", scope_ctx=self.scope_ctx)
+
+        with unittest.mock.patch.object(settings, "OPENROUTER_API_KEY", ""):
+            fallback_result = generate_test_cases("dataflow_distinguish_fallback", self.app_map, "desc", api_key=None, scope_ctx=self.scope_ctx)
+
+        ai_sources = {tc.get("generation_source") for tc in ai_result}
+        fallback_sources = {tc.get("generation_source") for tc in fallback_result}
+        self.assertEqual(ai_sources, {"AI_GENERATED"})
+        self.assertEqual(fallback_sources, {"STRUCTURAL_FALLBACK"})
+        self.assertTrue(ai_sources.isdisjoint(fallback_sources))
+
+    def test_test_case_prompts_specify_required_json_schema(self):
+        """Regression guard for a real observed failure: without an explicit field-name schema
+        in the prompt, a model can return valid JSON using different keys (e.g. 'title'/
+        'description'/'steps'/'expected_results' instead of 'scenario'/'test_steps'/
+        'expected_result') - the call succeeds and the case reaches the final collection, but
+        every Excel column stays blank because the pipeline never recognizes the keys used."""
+        captured_prompts = []
+
+        def capture_llm(model, prompt, scan_id, stage_name):
+            captured_prompts.append((stage_name, prompt))
+            return self._full_success_llm(model, prompt, scan_id, stage_name)
+
+        with unittest.mock.patch("app.generator.query_llm", side_effect=capture_llm), \
+             unittest.mock.patch("app.generator.run_quality_gate", side_effect=self._pass_through_quality_gate):
+            generate_test_cases("dataflow_schema_check", self.app_map, "desc", api_key="sk-or-fake-key", scope_ctx=self.scope_ctx)
+
+        stage4_prompts = [p for stage, p in captured_prompts if stage.startswith("STAGE 4")]
+        self.assertTrue(stage4_prompts, "STAGE 4 should have been called at least once")
+        for prompt in stage4_prompts:
+            self.assertIn('"scenario"', prompt)
+            self.assertIn('"test_steps"', prompt)
+            self.assertIn('"expected_result"', prompt)
+            self.assertIn('"module"', prompt)
+            self.assertIn('"feature"', prompt)
 
 
 if __name__ == "__main__":
