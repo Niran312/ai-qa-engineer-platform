@@ -10,7 +10,7 @@ services:
       mountPath: /app/data
       sizeGB: 1
     envVars:
-      - key: GEMINI_API_KEY
+      - key: OPENROUTER_API_KEY
         sync: false
       - key: ALLOWED_ORIGINS
         sync: false

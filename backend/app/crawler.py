@@ -509,7 +509,7 @@ async def crawl_site(scan_id: str, start_url: str, username: str = None, passwor
                 form_html = await page.evaluate(
                     "() => Array.from(document.querySelectorAll('form, input, button')).map(el => el.outerHTML).join('\\n')"
                 )
-                ai_selectors = get_ai_login_selectors(form_html[:40000], api_key=api_key, scan_id=scan_id)
+                ai_selectors = await asyncio.to_thread(get_ai_login_selectors, form_html[:40000], api_key=api_key, scan_id=scan_id)
                 u_sel = ai_selectors.get("username_selector")
                 p_sel = ai_selectors.get("password_selector")
                 s_sel = ai_selectors.get("submit_selector")

@@ -254,6 +254,37 @@ def derive_features_from_elements(elements: dict) -> tuple[list, list]:
 
     return features, validation_hints
 
+# The real login credentials must never be sent to the AI provider. The LLM driving the MCP
+# login flow only ever sees these placeholders; _fill_credentials() swaps the real values in
+# locally, right before the browser_type tool call, and _redact_credentials() scrubs them out of
+# any page snapshot (e.g. a filled-in field's value) before that snapshot goes into a prompt.
+USERNAME_PLACEHOLDER = "{{USERNAME}}"
+PASSWORD_PLACEHOLDER = "{{PASSWORD}}"
+
+LOGIN_CREDENTIALS_PROMPT = f"""
+                Username: {USERNAME_PLACEHOLDER}
+                Password: {PASSWORD_PLACEHOLDER}
+                These are placeholders - type them exactly as written (including the braces) as the
+                "text" value; the real credentials are substituted in automatically.
+"""
+
+
+def _redact_credentials(text: str, username: str = None, password: str = None) -> str:
+    if not text:
+        return text
+    if password:
+        text = text.replace(password, PASSWORD_PLACEHOLDER)
+    if username:
+        text = text.replace(username, USERNAME_PLACEHOLDER)
+    return text
+
+
+def _fill_credentials(text: str, username: str = None, password: str = None) -> str:
+    if not isinstance(text, str):
+        return text
+    return text.replace(USERNAME_PLACEHOLDER, username or "").replace(PASSWORD_PLACEHOLDER, password or "")
+
+
 async def mcp_call_tool_tracked(client, action: str, args: dict, scan_id: str, module: str = None, feature: str = None, scope_ctx: ScopeContext = None):
     """Invokes Playwright MCP tools while measuring operation durations and logging states."""
     if not scan_id:
@@ -514,9 +545,8 @@ async def run_mcp_discovery(scan_id: str, url: str, visited_pages: dict, usernam
                 login_prompt = f"""
                 You are a login automation script. Use the Playwright MCP browser to login.
                 URL: {url}
-                Username: {username}
-                Password: {password}
-                
+                {LOGIN_CREDENTIALS_PROMPT}
+
                 Find username/password fields and login button. Enter credentials and click sign in.
                 Return ONLY a JSON response:
                 {{
@@ -536,8 +566,9 @@ async def run_mcp_discovery(scan_id: str, url: str, visited_pages: dict, usernam
                     log_pipeline(scan_id, scope_ctx, "MCP", f"[END] Capturing page snapshot | duration={snap_dur:.2f}s")
                     save_completed_stage_dur(scan_id, "Page Snapshot", snap_dur)
                     
+                    safe_snapshot = _redact_credentials(snapshot, username, password)
                     with track_llm_call(scan_id, "MCP Login Automation"):
-                        resp = model.generate_content(f"{login_prompt}\n\nPAGE STATE:\n{snapshot[:2000]}")
+                        resp = await asyncio.to_thread(model.generate_content, f"{login_prompt}\n\nPAGE STATE:\n{safe_snapshot[:2000]}")
                     text = resp.text.strip()
                     if "```json" in text:
                         text = text.split("```json")[1].split("```")[0]
@@ -552,7 +583,7 @@ async def run_mcp_discovery(scan_id: str, url: str, visited_pages: dict, usernam
                     
                     action = cmd.get("action")
                     if action == "browser_type":
-                        await mcp_call_tool_tracked(client, "browser_type", {"selector": cmd["selector"], "text": cmd["text"]}, scan_id, "Authentication", "Login Flow", scope_ctx=scope_ctx)
+                        await mcp_call_tool_tracked(client, "browser_type", {"selector": cmd["selector"], "text": _fill_credentials(cmd["text"], username, password)}, scan_id, "Authentication", "Login Flow", scope_ctx=scope_ctx)
                     elif action == "browser_click":
                         await mcp_call_tool_tracked(client, "browser_click", {"selector": cmd["selector"]}, scan_id, "Authentication", "Login Flow", scope_ctx=scope_ctx)
                     await asyncio.sleep(0.5)
@@ -684,7 +715,7 @@ async def run_mcp_discovery(scan_id: str, url: str, visited_pages: dict, usernam
                 """
                 try:
                     with track_llm_call(scan_id, "Module Selection"):
-                        res = model.generate_content(mod_extractor)
+                        res = await asyncio.to_thread(model.generate_content, _redact_credentials(mod_extractor, password=password))
                     txt = res.text.strip()
                     if "```json" in txt:
                         txt = txt.split("```json")[1].split("```")[0]
@@ -708,7 +739,7 @@ async def run_mcp_discovery(scan_id: str, url: str, visited_pages: dict, usernam
                 ]
                 """
                 with track_llm_call(scan_id, "Exploration Queue Formulation"):
-                    res = model.generate_content(queue_prompt)
+                    res = await asyncio.to_thread(model.generate_content, _redact_credentials(queue_prompt, password=password))
                 txt = res.text.strip()
                 if "```json" in txt:
                     txt = txt.split("```json")[1].split("```")[0]
@@ -889,7 +920,7 @@ async def run_mcp_discovery(scan_id: str, url: str, visited_pages: dict, usernam
                 """
                 try:
                     with track_llm_call(scan_id, f"Behavior Exploration: {feat_name}"):
-                        resp = model.generate_content(agent_prompt)
+                        resp = await asyncio.to_thread(model.generate_content, _redact_credentials(agent_prompt, password=password))
                     mcp_llm_calls_count += 1
                     resp_txt = resp.text.strip()
                     if "```json" in resp_txt:
@@ -1004,7 +1035,7 @@ async def run_mcp_discovery(scan_id: str, url: str, visited_pages: dict, usernam
             """
             try:
                 with track_llm_call(scan_id, f"Behavior Structure Compilation: {feat_name}"):
-                    resp = model.generate_content(structurizer_prompt)
+                    resp = await asyncio.to_thread(model.generate_content, _redact_credentials(structurizer_prompt, password=password))
                 mcp_llm_calls_count += 1
                 resp_txt = resp.text.strip()
                 if "```json" in resp_txt:
@@ -1178,14 +1209,14 @@ async def run_mcp_gap_exploration(scan_id: str, url: str, gaps: List[Dict[str, A
                 login_prompt = f"""
                 Sign in using the Playwright browser.
                 URL: {url}
-                Username: {username}
-                Password: {password}
+                {LOGIN_CREDENTIALS_PROMPT}
                 Return JSON with sign-in action or sign-in completed.
                 """
                 for _ in range(4):
                     snapshot = await mcp_call_tool_tracked(client, "browser_snapshot", {}, scan_id, "Gap Exploration", "Login Flow", scope_ctx=scope_ctx)
+                    safe_snapshot = _redact_credentials(snapshot, username, password)
                     with track_llm_call(scan_id, "Gap Explorer Login"):
-                        resp = model.generate_content(f"{login_prompt}\n\nPAGE STATE:\n{snapshot[:2000]}")
+                        resp = await asyncio.to_thread(model.generate_content, f"{login_prompt}\n\nPAGE STATE:\n{safe_snapshot[:2000]}")
                     text = resp.text.strip()
                     if "```json" in text:
                         text = text.split("```json")[1].split("```")[0]
@@ -1194,7 +1225,7 @@ async def run_mcp_gap_exploration(scan_id: str, url: str, gaps: List[Dict[str, A
                         break
                     action = cmd.get("action")
                     if action == "browser_type":
-                        await mcp_call_tool_tracked(client, "browser_type", {"selector": cmd["selector"], "text": cmd["text"]}, scan_id, "Gap Exploration", "Login Flow", scope_ctx=scope_ctx)
+                        await mcp_call_tool_tracked(client, "browser_type", {"selector": cmd["selector"], "text": _fill_credentials(cmd["text"], username, password)}, scan_id, "Gap Exploration", "Login Flow", scope_ctx=scope_ctx)
                     elif action == "browser_click":
                         await mcp_call_tool_tracked(client, "browser_click", {"selector": cmd["selector"]}, scan_id, "Gap Exploration", "Login Flow", scope_ctx=scope_ctx)
                     await asyncio.sleep(0.5)
@@ -1283,7 +1314,7 @@ async def run_mcp_gap_exploration(scan_id: str, url: str, gaps: List[Dict[str, A
                 """
                 try:
                     with track_llm_call(scan_id, f"Gap Exploration decision: {f_name}"):
-                        resp = model.generate_content(agent_prompt)
+                        resp = await asyncio.to_thread(model.generate_content, _redact_credentials(agent_prompt, password=password))
                     mcp_llm_calls_count += 1
                     resp_txt = resp.text.strip()
                     if "```json" in resp_txt:
@@ -1348,7 +1379,7 @@ async def run_mcp_gap_exploration(scan_id: str, url: str, gaps: List[Dict[str, A
             """
             try:
                 with track_llm_call(scan_id, f"Gap Behavior structure: {f_name}"):
-                    resp = model.generate_content(structurizer_prompt)
+                    resp = await asyncio.to_thread(model.generate_content, _redact_credentials(structurizer_prompt, password=password))
                 mcp_llm_calls_count += 1
                 resp_txt = resp.text.strip()
                 if "```json" in resp_txt:

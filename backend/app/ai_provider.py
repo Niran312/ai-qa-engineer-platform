@@ -126,8 +126,12 @@ class OpenRouterModel:
 
         if resp.status_code != 200:
             error_type = _classify_http_error(resp.status_code, resp.text)
+            # Include OpenRouter's own response body (truncated) - it never echoes back the
+            # Authorization header/key, and without it a generic "provider_error" bucket gives
+            # no way to tell a bad model slug from a malformed payload from a real outage.
+            body_excerpt = (resp.text or "").strip()[:300]
             raise AIProviderError(
-                f"OpenRouter API error (status {resp.status_code}) for model '{model_name}': {error_type}",
+                f"OpenRouter API error (status {resp.status_code}) for model '{model_name}': {error_type} - {body_excerpt}",
                 error_type,
             )
 

@@ -218,8 +218,13 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
         # 3. Generate manual test cases via LLM combining structural & behavioral discovery
         gen_start = time.perf_counter()
         with track_stage(scan_id, "Test Case Generation"):
-            test_cases = generate_test_cases(scan_id, app_map, description, api_key=api_key, model_name=model_name,
-                                             mcp_behavior=mcp_behavior_json, scope_ctx=scope_ctx)
+            # generate_test_cases() makes many blocking OpenRouter HTTP calls (requests) - run it in a
+            # worker thread so it doesn't freeze the event loop (and every other API request,
+            # including the frontend's status polling) for the whole generation stage.
+            test_cases = await asyncio.to_thread(
+                generate_test_cases, scan_id, app_map, description, api_key=api_key, model_name=model_name,
+                mcp_behavior=mcp_behavior_json, scope_ctx=scope_ctx
+            )
         gen_end = time.perf_counter()
 
         # 3. Save map and test cases to DB
@@ -230,7 +235,7 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
         with track_stage(scan_id, "Excel Export"):
             excel_filename = f"{scan_id}_test_cases.xlsx"
             add_scan_log(scan_id, "[GENERATOR] Creating styled Excel spreadsheet...")
-            excel_path_full = export_to_excel(test_cases, excel_filename)
+            excel_path_full = await asyncio.to_thread(export_to_excel, test_cases, excel_filename)
             excel_relative_path = f"/static/downloads/{excel_filename}"
         excel_end = time.perf_counter()
 
