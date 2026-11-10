@@ -5,12 +5,18 @@ from mcp.client.stdio import stdio_client
 from ..config import settings
 from ..database import add_scan_log, update_scan_perf_data, save_completed_stage_dur
 
+PLAYWRIGHT_MCP_VERSION = "0.0.84"
+
+
 class PlaywrightMCPClient:
     """Standard client manager to interface with the Node-based @playwright/mcp server using Node 20."""
     
     def __init__(self, storage_state_path: str = None):
         # Dynamically launch using Node 20 and pass headless execution parameters to avoid hangs in server environments
-        args = ["-y", "-p", "node@20", "-p", "@playwright/mcp@latest", "playwright-mcp", "--headless", "--no-sandbox", "--isolated"]
+        # Pinned (not @latest) so a new upstream release can't silently change tool schemas or
+        # behavior between scans - tool argument names have already changed across versions
+        # (e.g. browser_type/browser_click: `ref` in 0.0.70 -> `target` in 0.0.84).
+        args = ["-y", "-p", "node@20", "-p", f"@playwright/mcp@{PLAYWRIGHT_MCP_VERSION}", "playwright-mcp", "--headless", "--no-sandbox", "--isolated"]
         if storage_state_path:
             # Reuse the crawler's already-authenticated session (cookies/localStorage) instead
             # of the MCP browser having to run its own from-scratch login flow.
@@ -75,14 +81,42 @@ class PlaywrightMCPClient:
             await self.disconnect()
             raise e
 
+    @staticmethod
+    def normalize_arguments(name: str, arguments: dict = None) -> dict:
+        """Translates the explorer's legacy argument names to the pinned @playwright/mcp schema.
+
+        The explorer (and the LLM prompts driving it) speak in terms of `selector` / `script` /
+        `value`, which is also what its safety gate inspects. @playwright/mcp 0.0.84 instead
+        requires `target` (a snapshot ref or a unique element selector), `function` (a JS arrow
+        function) and `values` (a list) - unknown keys are rejected outright. Translating here,
+        at the single point every tool call passes through, keeps all callers unchanged.
+        """
+        args = dict(arguments or {})
+        if "selector" in args:
+            selector = args.pop("selector")
+            args.setdefault("target", selector)
+        if name == "browser_evaluate" and "script" in args:
+            script = str(args.pop("script")).strip()
+            if "function" not in args:
+                if "=>" in script.split("{")[0] or script.startswith(("function", "async ")):
+                    args["function"] = script
+                elif ";" in script or script.startswith(("return ", "const ", "let ", "var ")):
+                    args["function"] = f"() => {{ {script} }}"
+                else:
+                    args["function"] = f"() => ({script})"
+        if name == "browser_select_option" and "value" in args and "values" not in args:
+            value = args.pop("value")
+            args["values"] = value if isinstance(value, list) else [value]
+        return args
+
     async def call_tool(self, name: str, arguments: dict = None) -> str:
         """Call a specific tool on the Playwright MCP server with timeout constraints."""
         if not self.session:
             raise RuntimeError("Playwright MCP Client is not connected.")
-        
+
         try:
             result = await asyncio.wait_for(
-                self.session.call_tool(name, arguments or {}),
+                self.session.call_tool(name, self.normalize_arguments(name, arguments)),
                 timeout=settings.MCP_TOOL_CALL_TIMEOUT
             )
             content_items = getattr(result, 'content', [])
