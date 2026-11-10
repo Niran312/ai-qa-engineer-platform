@@ -4,7 +4,7 @@ import urllib.parse
 import pandas as pd
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
-from .ai_provider import OpenRouterModel
+from .ai_provider import create_ai_model, ai_provider_name, ai_model_name
 from .config import settings
 from .database import add_scan_log, track_llm_call
 from .schemas import ScopeContext
@@ -309,15 +309,15 @@ def run_quality_gate(model, test_cases: list, scan_id: str, scope_ctx: ScopeCont
 
 def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_key: str = None, 
                         model_name: str = None, mcp_behavior: str = None, scope_ctx: ScopeContext = None) -> list:
-    """Invokes the multi-stage E2E QA reasoning pipeline using OpenRouter and structured MCP behavioral data."""
+    """Invokes the multi-stage E2E QA reasoning pipeline using the configured AI provider and structured MCP behavioral data."""
     log_pipeline(scan_id, scope_ctx, "GENERATOR", "Ingesting Structured Behavioral Discovery Data...")
 
     scan_scope_str = scope_ctx.scan_scope if scope_ctx else "entire"
 
-    gen_key = api_key or settings.OPENROUTER_API_KEY
-    if not gen_key:
-        log_pipeline(scan_id, scope_ctx, "GENERATOR", "[WARNING] No OPENROUTER_API_KEY provided. Generating mock test cases...")
-        log_llm_event(scan_id, provider="OpenRouter", api_key_present=False, status="SKIPPED")
+    model = create_ai_model(scan_id, api_key)
+    if model is None:
+        log_pipeline(scan_id, scope_ctx, "GENERATOR", f"[WARNING] No {ai_provider_name()} API key configured. Generating mock test cases...")
+        log_llm_event(scan_id, provider=ai_provider_name(), api_key_present=False, status="SKIPPED")
         mock_cases = get_mock_test_cases(app_map, scope_ctx)
         log_fallback_event(scan_id, reason="no_api_key", source="STRUCTURAL_EVIDENCE", cases=len(mock_cases))
         
@@ -418,13 +418,10 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
         except Exception as e:
             add_scan_log(scan_id, f"[WARNING] Failed to parse structured behavior telemetry: {e}")
 
-    log_llm_event(scan_id, provider="OpenRouter", model=settings.OPENROUTER_PRIMARY_MODEL,
+    log_llm_event(scan_id, provider=ai_provider_name(), model=ai_model_name(),
                   api_key_present=True, status="STARTED")
 
     try:
-        model = OpenRouterModel(api_key=gen_key, model_name=settings.OPENROUTER_PRIMARY_MODEL,
-                                 fallback_models=[m.strip() for m in settings.OPENROUTER_FALLBACK_MODELS.split(",") if m.strip()],
-                                 scan_id=scan_id)
 
         crawled_nodes = app_map.get("nodes", [])
         crawled_edges = app_map.get("edges", [])
@@ -703,7 +700,7 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
             log_pipeline(scan_id, scope_ctx, "GENERATOR",
                          "[WARNING] AI pipeline completed with no exception but produced zero usable test cases "
                          "(every OpenRouter response was empty/unparseable). Falling back to structural generator.")
-            log_llm_event(scan_id, provider="OpenRouter", model=settings.OPENROUTER_PRIMARY_MODEL,
+            log_llm_event(scan_id, provider=ai_provider_name(), model=ai_model_name(),
                           status="FAILED", error="AI pipeline completed but produced zero parseable test cases")
             mock_cases = get_mock_test_cases(app_map, scope_ctx)
             log_fallback_event(scan_id, reason="empty_ai_output", source="STRUCTURAL_EVIDENCE", cases=len(mock_cases))
@@ -837,13 +834,13 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
             log_pipeline(scan_id, scope_ctx, "GENERATOR", f" {mod} | {feat} | {obs} | {struct} | {inf} | {skip} | {feat_pct}% ")
         log_pipeline(scan_id, scope_ctx, "GENERATOR", "=======================================================================================")
 
-        log_llm_event(scan_id, provider="OpenRouter", model=settings.OPENROUTER_PRIMARY_MODEL,
+        log_llm_event(scan_id, provider=ai_provider_name(), model=ai_model_name(),
                       status="SUCCESS", generated_cases=len(final_test_cases))
         return final_test_cases
 
     except Exception as e:
         log_pipeline(scan_id, scope_ctx, "GENERATOR", f"[ERROR] Failed during AI reasoning: {e}. Falling back to mock generator.")
-        log_llm_event(scan_id, provider="OpenRouter", model=settings.OPENROUTER_PRIMARY_MODEL,
+        log_llm_event(scan_id, provider=ai_provider_name(), model=ai_model_name(),
                       status="FAILED", error=str(e))
         mock_cases = get_mock_test_cases(app_map, scope_ctx)
         log_fallback_event(scan_id, reason=str(e), source="STRUCTURAL_EVIDENCE", cases=len(mock_cases))

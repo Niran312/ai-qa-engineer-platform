@@ -2,7 +2,22 @@ import os
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
-    # OpenRouter (OpenAI-compatible) AI provider settings.
+    # Which AI provider every LLM call goes through: "anthropic" (Claude, default) or "openrouter".
+    AI_PROVIDER: str = os.getenv("AI_PROVIDER", "anthropic")
+
+    # Anthropic (Claude) provider settings.
+    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+    ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
+    # Effort trades thoroughness against tokens/latency. "medium" is the recommended starting
+    # point for multi-step agentic work on Claude Sonnet 5.5 (whose own default is "high");
+    # options: low | medium | high | xhigh | max.
+    ANTHROPIC_EFFORT: str = os.getenv("ANTHROPIC_EFFORT", "medium")
+    # Covers thinking + the visible answer; requests are streamed, so a large cap is safe.
+    ANTHROPIC_MAX_TOKENS: int = int(os.getenv("ANTHROPIC_MAX_TOKENS", "32000"))
+    ANTHROPIC_TIMEOUT: float = float(os.getenv("ANTHROPIC_TIMEOUT", "300"))
+    ANTHROPIC_MAX_RETRIES: int = int(os.getenv("ANTHROPIC_MAX_RETRIES", "2"))
+
+    # OpenRouter (OpenAI-compatible) AI provider settings - used when AI_PROVIDER=openrouter.
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
     OPENROUTER_PRIMARY_MODEL: str = os.getenv("OPENROUTER_PRIMARY_MODEL", "z-ai/glm-5.2:free")
     # Comma-separated list, tried in order only if the primary model fails. Empty by default -

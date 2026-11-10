@@ -1,8 +1,9 @@
-"""OpenRouter AI provider adapter.
+"""AI provider adapters (Anthropic Claude and OpenRouter).
 
-Exposes OpenRouterModel with the same .generate_content(prompt) -> object.text
-interface as google.generativeai's GenerativeModel, so every existing call site
-across crawler.py / mcp_explorer.py / generator.py works unchanged.
+Both AnthropicModel and OpenRouterModel expose the same .generate_content(prompt) -> object.text
+interface, so every call site across crawler.py / mcp_explorer.py / generator.py works
+unchanged. Call sites get a model through create_ai_model(), which picks the provider from
+settings.AI_PROVIDER.
 """
 import json
 import time
@@ -15,7 +16,7 @@ OPENROUTER_ENDPOINT = "/chat/completions"
 
 
 class AIProviderError(Exception):
-    """Raised for any OpenRouter failure. Never carries the API key or Authorization header."""
+    """Raised for any AI provider failure. Never carries the API key or Authorization header."""
 
     def __init__(self, message: str, error_type: str):
         super().__init__(message)
@@ -42,7 +43,8 @@ def _classify_http_error(status_code: int, body_text: str) -> str:
     return "provider_error"
 
 
-def _record_telemetry(scan_id, requested_model, actual_model, success, error_type, duration, usage):
+def _record_telemetry(scan_id, requested_model, actual_model, success, error_type, duration, usage,
+                      provider: str = "OpenRouter"):
     if not scan_id:
         return
     try:
@@ -60,7 +62,7 @@ def _record_telemetry(scan_id, requested_model, actual_model, success, error_typ
         conn.close()
 
         ai_provider = perf_data.get("ai_provider", {
-            "provider": "OpenRouter",
+            "provider": provider,
             "requested_model": requested_model,
             "actual_model": None,
             "calls": 0,
@@ -170,3 +172,108 @@ class OpenRouterModel:
                 raise last_error
 
         raise last_error
+
+
+# --- Anthropic (Claude) -------------------------------------------------------------------
+
+# Server-side refusal fallback: if Claude Sonnet 5.5's safety classifiers decline a request,
+# the API re-runs it on Anthropic's recommended fallback model inside the same call.
+ANTHROPIC_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+
+def _classify_anthropic_error(exc) -> str:
+    import anthropic
+    if isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
+        return "invalid_api_key"
+    if isinstance(exc, anthropic.RateLimitError):
+        return "rate_limit"
+    if isinstance(exc, anthropic.APITimeoutError):
+        return "timeout"
+    if isinstance(exc, anthropic.NotFoundError):
+        return "model_unavailable"
+    if isinstance(exc, anthropic.BadRequestError):
+        msg = str(getattr(exc, "message", "") or exc).lower()
+        if "context" in msg and ("length" in msg or "window" in msg) or "too long" in msg:
+            return "context_length_exceeded"
+        return "bad_request"
+    return "provider_error"
+
+
+class AnthropicModel:
+    """Calls Claude through the official Anthropic SDK (Messages API, streamed)."""
+
+    def __init__(self, api_key: str, model_name: str = None, scan_id: str = None):
+        import anthropic
+        self.model_name = model_name or settings.ANTHROPIC_MODEL
+        self.scan_id = scan_id
+        # The SDK retries connection errors, 408/409/429 and 5xx with backoff on its own.
+        self._client = anthropic.Anthropic(api_key=api_key, timeout=settings.ANTHROPIC_TIMEOUT,
+                                           max_retries=settings.ANTHROPIC_MAX_RETRIES)
+
+    def generate_content(self, prompt: str) -> _Response:
+        import anthropic
+        start = time.perf_counter()
+        try:
+            # Streamed (with get_final_message) so long generations never hit an HTTP timeout.
+            with self._client.beta.messages.stream(
+                model=self.model_name,
+                max_tokens=settings.ANTHROPIC_MAX_TOKENS,
+                output_config={"effort": settings.ANTHROPIC_EFFORT},
+                betas=[ANTHROPIC_FALLBACK_BETA],
+                fallbacks="default",
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                message = stream.get_final_message()
+        except anthropic.APIError as e:
+            duration = time.perf_counter() - start
+            error_type = _classify_anthropic_error(e)
+            _record_telemetry(self.scan_id, self.model_name, None, False, error_type, duration, None, provider="Anthropic")
+            raise AIProviderError(f"Anthropic API error for model '{self.model_name}': {error_type} - {str(e)[:300]}",
+                                  error_type) from e
+
+        duration = time.perf_counter() - start
+        if message.stop_reason == "refusal":
+            _record_telemetry(self.scan_id, self.model_name, message.model, False, "refusal", duration, None, provider="Anthropic")
+            category = getattr(getattr(message, "stop_details", None), "category", None)
+            raise AIProviderError(f"Claude declined the request (category={category}).", "refusal")
+
+        text = "".join(block.text for block in message.content if block.type == "text")
+        if message.stop_reason == "max_tokens":
+            # A truncated answer is almost always invalid JSON here - fail loudly instead of
+            # handing a half-written payload to the parsers.
+            _record_telemetry(self.scan_id, self.model_name, message.model, False, "max_tokens", duration, None, provider="Anthropic")
+            raise AIProviderError(f"Claude response hit max_tokens ({settings.ANTHROPIC_MAX_TOKENS}) and was truncated.",
+                                  "max_tokens")
+
+        usage = {"prompt_tokens": message.usage.input_tokens, "completion_tokens": message.usage.output_tokens}
+        _record_telemetry(self.scan_id, self.model_name, message.model, True, None, duration, usage, provider="Anthropic")
+        return _Response(text)
+
+
+# --- Provider selection ---------------------------------------------------------------------
+
+def ai_provider_name() -> str:
+    return "Anthropic" if settings.AI_PROVIDER.strip().lower() == "anthropic" else "OpenRouter"
+
+
+def ai_model_name() -> str:
+    return settings.ANTHROPIC_MODEL if ai_provider_name() == "Anthropic" else settings.OPENROUTER_PRIMARY_MODEL
+
+
+def create_ai_model(scan_id: str = None, request_api_key: str = None):
+    """Returns a model for the configured provider, or None when that provider has no key.
+
+    request_api_key is the optional key typed into the frontend's "OpenRouter AI Settings"
+    panel, so it only ever applies to the OpenRouter provider - it is never sent to Anthropic.
+    """
+    if ai_provider_name() == "Anthropic":
+        if not settings.ANTHROPIC_API_KEY:
+            return None
+        return AnthropicModel(api_key=settings.ANTHROPIC_API_KEY, scan_id=scan_id)
+
+    key = request_api_key or settings.OPENROUTER_API_KEY
+    if not key:
+        return None
+    return OpenRouterModel(api_key=key, model_name=settings.OPENROUTER_PRIMARY_MODEL,
+                           fallback_models=[m.strip() for m in settings.OPENROUTER_FALLBACK_MODELS.split(",") if m.strip()],
+                           scan_id=scan_id)
