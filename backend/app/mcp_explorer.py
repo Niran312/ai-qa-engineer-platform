@@ -285,6 +285,14 @@ def _fill_credentials(text: str, username: str = None, password: str = None) -> 
     return text.replace(USERNAME_PLACEHOLDER, username or "").replace(PASSWORD_PLACEHOLDER, password or "")
 
 
+def _extract_url(eval_result) -> str:
+    """browser_evaluate returns markdown (e.g. '### Result\n"https://..."\n### Ran Playwright
+    code ...'), not a bare value - pull the first URL out of it so it can be url-parsed."""
+    text = str(eval_result)
+    match = re.search(r"https?://[^\s\"'`)\]]+", text)
+    return match.group(0) if match else text
+
+
 async def mcp_call_tool_tracked(client, action: str, args: dict, scan_id: str, module: str = None, feature: str = None, scope_ctx: ScopeContext = None):
     """Invokes Playwright MCP tools while measuring operation durations and logging states."""
     if not scan_id:
@@ -985,7 +993,7 @@ async def run_mcp_discovery(scan_id: str, url: str, visited_pages: dict, usernam
                     
                     eval_res = await mcp_call_tool_tracked(client, "browser_evaluate", {"script": "window.location.href"}, scan_id, module_name, feat_name, scope_ctx=scope_ctx)
                     mcp_actions_count += 1
-                    curr_url = str(eval_res).lower()
+                    curr_url = _extract_url(eval_res).lower()
                     
                     is_curr_out_of_scope = False
                     if scope_ctx and scope_ctx.scan_scope in ("module", "MODULE", "MODULE_WISE"):
@@ -1344,7 +1352,7 @@ async def run_mcp_gap_exploration(scan_id: str, url: str, gaps: List[Dict[str, A
                     
                     eval_res = await mcp_call_tool_tracked(client, "browser_evaluate", {"script": "window.location.href"}, scan_id, m_name, f_name, scope_ctx=scope_ctx)
                     mcp_actions_count += 1
-                    curr_url = str(eval_res).lower()
+                    curr_url = _extract_url(eval_res).lower()
                     
                     is_curr_out_of_scope = False
                     if scope_ctx and scope_ctx.scan_scope in ("module", "MODULE", "MODULE_WISE"):

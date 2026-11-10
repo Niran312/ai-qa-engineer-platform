@@ -1273,3 +1273,45 @@ class TestLoginCredentialsNeverSentToAI(unittest.TestCase):
         except Exception:
             pass  # gap-exploration outcome is irrelevant here - only the login flow is under test
         self._assert_no_leak()
+
+
+class TestMCPArgumentCompatibility(unittest.TestCase):
+    """The explorer speaks selector/script/value; pinned @playwright/mcp requires
+    target/function/values and rejects unknown keys."""
+
+    def _norm(self, name, args):
+        from app.mcp.playwright_client import PlaywrightMCPClient
+        return PlaywrightMCPClient.normalize_arguments(name, args)
+
+    def test_selector_becomes_target(self):
+        self.assertEqual(self._norm("browser_click", {"selector": "#add"}), {"target": "#add"})
+        self.assertEqual(self._norm("browser_type", {"selector": "#u", "text": "x"}), {"target": "#u", "text": "x"})
+
+    def test_explicit_target_is_kept(self):
+        self.assertEqual(self._norm("browser_click", {"target": "e12", "selector": "#x"}), {"target": "e12"})
+
+    def test_expression_script_wrapped_as_function(self):
+        self.assertEqual(self._norm("browser_evaluate", {"script": "window.location.href"}),
+                         {"function": "() => (window.location.href)"})
+
+    def test_statement_script_wrapped_in_block(self):
+        self.assertEqual(self._norm("browser_evaluate", {"script": "return document.title;"}),
+                         {"function": "() => { return document.title; }"})
+
+    def test_arrow_function_script_passed_through(self):
+        self.assertEqual(self._norm("browser_evaluate", {"script": "() => document.title"}),
+                         {"function": "() => document.title"})
+
+    def test_select_option_value_becomes_values_list(self):
+        self.assertEqual(self._norm("browser_select_option", {"selector": "#s", "value": "a"}),
+                         {"target": "#s", "values": ["a"]})
+
+    def test_navigate_and_snapshot_untouched(self):
+        self.assertEqual(self._norm("browser_navigate", {"url": "http://x/"}), {"url": "http://x/"})
+        self.assertEqual(self._norm("browser_snapshot", None), {})
+
+    def test_extract_url_from_markdown_evaluate_result(self):
+        from app.mcp_explorer import _extract_url
+        md = '### Result\n"http://example.com/clients/list?page=2"\n### Ran Playwright code\n```js\nawait page.evaluate(...)\n```'
+        self.assertEqual(_extract_url(md), "http://example.com/clients/list?page=2")
+        self.assertEqual(_extract_url("http://plain/url"), "http://plain/url")
