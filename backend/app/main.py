@@ -13,7 +13,7 @@ from .crawler import crawl_site
 from .mcp_explorer import run_mcp_discovery, run_mcp_gap_exploration
 from .generator import generate_test_cases, export_to_excel
 from .schemas import ScanRequest, ScanResponse, ScanHistoryItem, ScopeContext
-from .ai_provider import ai_provider_name, ai_model_name
+from .ai_provider import resolve_ai, detect_provider, server_key_configured
 from typing import Optional
 
 
@@ -427,6 +427,10 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
 
 @app.post("/api/scan", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks, client_id: str = Depends(resolve_client_id)):
+    if request.api_key and detect_provider(request.api_key) is None:
+        raise HTTPException(status_code=400,
+                            detail="Unrecognized API key format. Enter an Anthropic key (sk-ant-...) or an OpenRouter key (sk-or-...).")
+
     scan_id = str(uuid.uuid4())
     create_scan(scan_id, str(request.url), request.description, client_id)
 
@@ -439,11 +443,13 @@ async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks, cl
     )
 
     log_pipeline(scan_id, scope_ctx, "SCAN-CONFIG", f"Scan request received for URL: {request.url}")
-    log_pipeline(scan_id, scope_ctx, "SCAN-CONFIG", f"AI provider: {ai_provider_name()} | model: {ai_model_name()}")
-    if request.openrouter_api_key and ai_provider_name() != "OpenRouter":
+    provider, _, model, key_source = resolve_ai(request.api_key)
+    # Never log the key itself - only which provider/model it selects and where it came from.
+    log_pipeline(scan_id, scope_ctx, "SCAN-CONFIG", f"AI provider: {provider} | model: {model} | key: {key_source}")
+    if key_source == "none":
         log_pipeline(scan_id, scope_ctx, "SCAN-CONFIG",
-                     f"[WARNING] An OpenRouter API key was supplied with this request but AI_PROVIDER is "
-                     f"{ai_provider_name()} - the key is ignored and the server-side {ai_provider_name()} key is used.")
+                     "[WARNING] No AI API key provided and no server key configured - "
+                     "AI exploration is skipped and structural test cases are generated instead.")
     log_pipeline(scan_id, scope_ctx, "SCAN-CONFIG",
                  f"Parameters: scan_scope={scope_ctx.scan_scope}, parent_module={scope_ctx.parent_module}, selected_module={scope_ctx.selected_module}")
     add_scan_log(scan_id,
@@ -455,12 +461,21 @@ async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks, cl
         request.username,
         request.password,
         request.description,
-        request.openrouter_api_key,
+        request.api_key,
         None,
         scope_ctx
     )
 
     return {"scan_id": scan_id}
+
+
+@app.get("/api/config")
+async def public_config():
+    """Tells the frontend whether users must bring their own AI key (no secrets exposed)."""
+    return {
+        "server_key_configured": server_key_configured(),
+        "accepted_key_prefixes": ["sk-ant-", "sk-or-"],
+    }
 
 
 @app.get("/api/health")

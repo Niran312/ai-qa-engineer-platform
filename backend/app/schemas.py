@@ -6,10 +6,20 @@ class ScanRequest(BaseModel):
     username: Optional[str] = None
     password: Optional[str] = None
     description: Optional[str] = None
+    # The user's own AI key (Anthropic "sk-ant-..." or OpenRouter "sk-or-..."), used only for this
+    # scan and never persisted. openrouter_api_key is the legacy field name, still accepted.
+    api_key: Optional[str] = None
     openrouter_api_key: Optional[str] = None
     scan_scope: Optional[str] = None
     parent_module: Optional[str] = None
     selected_module: Optional[str] = None
+
+    @model_validator(mode='after')
+    def merge_legacy_key_field(self) -> 'ScanRequest':
+        key = (self.api_key or self.openrouter_api_key or "").strip()
+        self.api_key = key or None
+        self.openrouter_api_key = None
+        return self
 
     @model_validator(mode='after')
     def check_module_params(self) -> 'ScanRequest':

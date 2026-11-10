@@ -470,7 +470,7 @@ async def run_mcp_discovery(scan_id: str, url: str, visited_pages: dict, usernam
     
     model = create_ai_model(scan_id, api_key)
     if model is None:
-        log_pipeline(scan_id, scope_ctx, "MCP-SCOPE", f"[WARNING] No {ai_provider_name()} API key configured. Skipping MCP behavioral discovery.")
+        log_pipeline(scan_id, scope_ctx, "MCP-SCOPE", f"[WARNING] No {ai_provider_name(api_key)} API key provided (enter one in the frontend or configure a server key). Skipping MCP behavioral discovery.")
         return json.dumps({"modules": [], "safety_actions_log": [], "coverage_gaps": []})
 
     # Pre-resolve scoping keywords for boundary checking

@@ -1,6 +1,16 @@
-import React, {useState} from 'react';
+import React, {useState, useEffect} from 'react';
 import {Play, Globe, Shield, FileText, ChevronDown, ChevronUp, RotateCcw, Bot} from 'lucide-react';
 import {DEFAULT_AI_INSTRUCTIONS, MODULE_WISE_AI_INSTRUCTIONS} from '../constants/prompts';
+import {apiFetch} from '../api';
+
+// Bring-your-own-key: the key's prefix decides which AI provider runs the scan.
+const detectKeyProvider = (key) => {
+    const k = key.trim();
+    if (!k) return null;
+    if (k.startsWith('sk-ant-')) return 'Anthropic (Claude Sonnet 5.5)';
+    if (k.startsWith('sk-or-')) return 'OpenRouter';
+    return 'unknown';
+};
 
 const isValidUrl = (value) => {
     const trimmed = value.trim();
@@ -37,7 +47,21 @@ export default function Dashboard({onSubmit, loading}) {
     const [showAuth, setShowAuth] = useState(false);
     const [hasUserEditedInstructions, setHasUserEditedInstructions] = useState(false);
     const [apiKey, setApiKey] = useState('');
-    const [showAiSettings, setShowAiSettings] = useState(false);
+    const [showAiSettings, setShowAiSettings] = useState(true);
+    // null = unknown yet; when the server has no key of its own, every user must bring one.
+    const [serverKeyConfigured, setServerKeyConfigured] = useState(null);
+
+    useEffect(() => {
+        apiFetch('/api/config')
+            .then((res) => (res.ok ? res.json() : null))
+            .then((cfg) => setServerKeyConfigured(cfg ? !!cfg.server_key_configured : null))
+            .catch(() => setServerKeyConfigured(null));
+    }, []);
+
+    const keyProvider = detectKeyProvider(apiKey);
+    const keyRequired = serverKeyConfigured === false;
+    const keyInvalid = keyProvider === 'unknown';
+    const keyMissing = keyRequired && !apiKey.trim();
     const [scanScope, setScanScope] = useState('');
     const [parentModule, setParentModule] = useState('');
     const [selectedModule, setSelectedModule] = useState('');
@@ -107,7 +131,7 @@ export default function Dashboard({onSubmit, loading}) {
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        if (!url) return;
+        if (!url || keyInvalid || keyMissing) return;
 
         // Add http:// prefix if user forgot it
         let cleanUrl = url.trim();
@@ -120,7 +144,8 @@ export default function Dashboard({onSubmit, loading}) {
             username: username.trim() || null,
             password: password || null,
             description: description.trim() || null,
-            openrouter_api_key: apiKey.trim() || null,
+            // Sent only with this request; never saved in the browser or on the server.
+            api_key: apiKey.trim() || null,
             scan_scope: scanScope || null,
             parent_module: scanScope === 'module' ? parentModule.trim() : null,
             selected_module: scanScope === 'module' ? selectedModule.trim() : null,
@@ -201,28 +226,45 @@ export default function Dashboard({onSubmit, loading}) {
                     )}
                 </div>
 
-                {/* OpenRouter Settings Toggler */}
+                {/* AI API Key (bring your own key) */}
                 <div className="form-group span-2">
                     <div className="auth-header-toggle" onClick={() => setShowAiSettings(!showAiSettings)}>
                         <Bot className="menu-icon"
                              style={{color: showAiSettings ? 'var(--secondary)' : 'var(--text-muted)'}}/>
-                        <span>OpenRouter AI Settings (Optional)</span>
+                        <span>AI API Key {keyRequired ? '(Required)' : '(Optional)'}</span>
                         {showAiSettings ? <ChevronUp size={16}/> : <ChevronDown size={16}/>}
                     </div>
 
                     {showAiSettings && (
                         <div className="auth-block">
                             <div className="form-group">
-                                <label className="form-label" htmlFor="api-key-input">OpenRouter API Key</label>
+                                <label className="form-label" htmlFor="api-key-input">Your Anthropic or OpenRouter API Key</label>
+                                <p className="helper-text">
+                                    Used only for this scan and never stored. AI usage is billed to your own account.
+                                    {serverKeyConfigured === true && ' Leave empty to use the server\'s key.'}
+                                </p>
                                 <input
                                     id="api-key-input"
                                     type="password"
+                                    autoComplete="off"
                                     className="form-input"
-                                    placeholder="sk-or-v1-..."
+                                    placeholder="sk-ant-...  or  sk-or-v1-..."
                                     value={apiKey}
                                     onChange={(e) => setApiKey(e.target.value)}
                                     disabled={loading}
+                                    required={keyRequired}
+                                    style={keyInvalid ? {borderColor: 'var(--danger)'} : undefined}
                                 />
+                                {keyProvider && !keyInvalid && (
+                                    <p className="helper-text" style={{marginTop: '0.5rem', color: 'var(--accent)'}}>
+                                        Provider: {keyProvider}
+                                    </p>
+                                )}
+                                {keyInvalid && (
+                                    <p className="helper-text" style={{marginTop: '0.5rem', color: 'var(--danger)'}}>
+                                        Unrecognized key. Anthropic keys start with sk-ant-, OpenRouter keys with sk-or-.
+                                    </p>
+                                )}
                             </div>
                         </div>
                     )}
@@ -332,7 +374,7 @@ export default function Dashboard({onSubmit, loading}) {
 
                 {/* Form Action */}
                 <div className="span-2" style={{textAlign: 'right', marginTop: '1rem'}}>
-                    <button type="submit" className="primary-btn" disabled={loading || !url}>
+                    <button type="submit" className="primary-btn" disabled={loading || !url || keyInvalid || keyMissing}>
                         <Play size={18} fill="currentColor"/>
                         {loading ? 'Initializing Agent...' : 'Launch Automated QA Agent'}
                     </button>

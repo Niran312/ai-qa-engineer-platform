@@ -316,8 +316,8 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
 
     model = create_ai_model(scan_id, api_key)
     if model is None:
-        log_pipeline(scan_id, scope_ctx, "GENERATOR", f"[WARNING] No {ai_provider_name()} API key configured. Generating mock test cases...")
-        log_llm_event(scan_id, provider=ai_provider_name(), api_key_present=False, status="SKIPPED")
+        log_pipeline(scan_id, scope_ctx, "GENERATOR", f"[WARNING] No {ai_provider_name(api_key)} API key provided (enter one in the frontend or configure a server key). Generating mock test cases...")
+        log_llm_event(scan_id, provider=ai_provider_name(api_key), api_key_present=False, status="SKIPPED")
         mock_cases = get_mock_test_cases(app_map, scope_ctx)
         log_fallback_event(scan_id, reason="no_api_key", source="STRUCTURAL_EVIDENCE", cases=len(mock_cases))
         
@@ -418,7 +418,7 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
         except Exception as e:
             add_scan_log(scan_id, f"[WARNING] Failed to parse structured behavior telemetry: {e}")
 
-    log_llm_event(scan_id, provider=ai_provider_name(), model=ai_model_name(),
+    log_llm_event(scan_id, provider=ai_provider_name(api_key), model=ai_model_name(api_key),
                   api_key_present=True, status="STARTED")
 
     try:
@@ -700,7 +700,7 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
             log_pipeline(scan_id, scope_ctx, "GENERATOR",
                          "[WARNING] AI pipeline completed with no exception but produced zero usable test cases "
                          "(every OpenRouter response was empty/unparseable). Falling back to structural generator.")
-            log_llm_event(scan_id, provider=ai_provider_name(), model=ai_model_name(),
+            log_llm_event(scan_id, provider=ai_provider_name(api_key), model=ai_model_name(api_key),
                           status="FAILED", error="AI pipeline completed but produced zero parseable test cases")
             mock_cases = get_mock_test_cases(app_map, scope_ctx)
             log_fallback_event(scan_id, reason="empty_ai_output", source="STRUCTURAL_EVIDENCE", cases=len(mock_cases))
@@ -834,13 +834,13 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
             log_pipeline(scan_id, scope_ctx, "GENERATOR", f" {mod} | {feat} | {obs} | {struct} | {inf} | {skip} | {feat_pct}% ")
         log_pipeline(scan_id, scope_ctx, "GENERATOR", "=======================================================================================")
 
-        log_llm_event(scan_id, provider=ai_provider_name(), model=ai_model_name(),
+        log_llm_event(scan_id, provider=ai_provider_name(api_key), model=ai_model_name(api_key),
                       status="SUCCESS", generated_cases=len(final_test_cases))
         return final_test_cases
 
     except Exception as e:
         log_pipeline(scan_id, scope_ctx, "GENERATOR", f"[ERROR] Failed during AI reasoning: {e}. Falling back to mock generator.")
-        log_llm_event(scan_id, provider=ai_provider_name(), model=ai_model_name(),
+        log_llm_event(scan_id, provider=ai_provider_name(api_key), model=ai_model_name(api_key),
                       status="FAILED", error=str(e))
         mock_cases = get_mock_test_cases(app_map, scope_ctx)
         log_fallback_event(scan_id, reason=str(e), source="STRUCTURAL_EVIDENCE", cases=len(mock_cases))
