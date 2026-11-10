@@ -1171,3 +1171,105 @@ class TestGenerationDataFlow(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLoginCredentialsNeverSentToAI(unittest.TestCase):
+    """The target app's real username/password must never appear in any prompt sent to the AI
+    provider - the LLM only sees placeholders, and the real values are substituted locally into
+    the browser_type tool call."""
+
+    USERNAME = "qa.user@example.com"
+    PASSWORD = "S3cr3t-Pa55!"
+
+    def _setup(self, mock_client_cls, mock_model_cls):
+        self.prompts = []
+        self.typed = []
+        login_steps = iter([
+            '{"action": "browser_type", "selector": "#user", "text": "{{USERNAME}}"}',
+            '{"action": "browser_type", "selector": "#pass", "text": "{{PASSWORD}}"}',
+            '{"login_complete": true}',
+        ])
+
+        class FakeResp:
+            def __init__(self, text):
+                self.text = text
+
+        def fake_generate(prompt):
+            self.prompts.append(prompt)
+            if "PAGE STATE" in prompt:
+                return FakeResp(next(login_steps, '{"login_complete": true}'))
+            return FakeResp("[]")
+        mock_model_cls.return_value.generate_content.side_effect = fake_generate
+
+        client = mock_client_cls.return_value
+
+        async def noop(*a, **k):
+            pass
+        client.connect = noop
+        client.disconnect = noop
+
+        class Tools:
+            tools = list(range(24))
+
+        class Session:
+            async def list_tools(self):
+                return Tools()
+        client.session = Session()
+
+        password = self.PASSWORD
+
+        async def call_tool(action, args):
+            if action == "browser_type":
+                self.typed.append(args["text"])
+            # Simulates a snapshot echoing back a filled-in field's value.
+            return f'- textbox "Password": {password}\n- textbox "Email": qa.user@example.com'
+        client.call_tool = call_tool
+
+    def _assert_no_leak(self):
+        self.assertTrue(any("PAGE STATE" in p for p in self.prompts), "login flow never ran")
+        for p in self.prompts:
+            self.assertNotIn(self.PASSWORD, p)
+            if "PAGE STATE" in p:  # login prompts also hide the username
+                self.assertNotIn(self.USERNAME, p)
+        self.assertIn(self.USERNAME, self.typed)
+        self.assertIn(self.PASSWORD, self.typed)
+
+    @unittest.mock.patch('app.playwright_core_engine.run_playwright_core_exploration')
+    @unittest.mock.patch('app.mcp_explorer.OpenRouterModel')
+    @unittest.mock.patch('app.mcp_explorer.PlaywrightMCPClient')
+    @unittest.mock.patch('app.mcp_explorer.update_scan_perf_data')
+    @unittest.mock.patch('app.mcp_explorer.save_completed_stage_dur')
+    @unittest.mock.patch('app.mcp_explorer.log_pipeline')
+    def test_pass1_login_uses_placeholders(self, mock_log, mock_save, mock_perf, mock_client_cls, mock_model_cls, mock_pw_core):
+        self._setup(mock_client_cls, mock_model_cls)
+        import asyncio
+        try:
+            asyncio.run(run_mcp_discovery(
+                scan_id="test_scan_creds", url="http://example.com/",
+                visited_pages=TestScopeContextAndFirewall._mock_visited_pages(),
+                username=self.USERNAME, password=self.PASSWORD, api_key="mock_key",
+                scope_ctx=TestScopeContextAndFirewall._mock_scope_ctx()
+            ))
+        except Exception:
+            pass  # later exploration outcome is irrelevant here (stubbed LLM) - only the login flow is under test
+        self._assert_no_leak()
+
+    @unittest.mock.patch('app.mcp_explorer.OpenRouterModel')
+    @unittest.mock.patch('app.mcp_explorer.PlaywrightMCPClient')
+    @unittest.mock.patch('app.mcp_explorer.update_scan_perf_data')
+    @unittest.mock.patch('app.mcp_explorer.save_completed_stage_dur')
+    @unittest.mock.patch('app.mcp_explorer.log_pipeline')
+    def test_pass2_gap_login_uses_placeholders(self, mock_log, mock_save, mock_perf, mock_client_cls, mock_model_cls):
+        from app.mcp_explorer import run_mcp_gap_exploration
+        self._setup(mock_client_cls, mock_model_cls)
+        import asyncio
+        try:
+            asyncio.run(run_mcp_gap_exploration(
+            "test_scan_creds_gap", "http://example.com/",
+            [{"module": "Clients", "page": "Clients", "feature": "Add Client", "gap": "not observed"}],
+            username=self.USERNAME, password=self.PASSWORD, api_key="mock_key",
+            scope_ctx=TestScopeContextAndFirewall._mock_scope_ctx()
+            ))
+        except Exception:
+            pass  # gap-exploration outcome is irrelevant here - only the login flow is under test
+        self._assert_no_leak()
