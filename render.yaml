@@ -10,6 +10,10 @@ services:
       mountPath: /app/data
       sizeGB: 1
     envVars:
+      - key: AI_PROVIDER
+        value: anthropic
+      - key: ANTHROPIC_API_KEY
+        sync: false
       - key: OPENROUTER_API_KEY
         sync: false
       - key: ALLOWED_ORIGINS

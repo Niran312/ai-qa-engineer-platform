@@ -41,3 +41,6 @@ backend/.playwright-mcp/
 
 # --- Generated images / test artifacts ---
 backend/*.png
+# --- /brag launch video output ---
+brag-output/
+brag-output-*/

@@ -22,15 +22,12 @@ def log_pipeline(scan_id: str, scope_ctx: Optional[ScopeContext], tag: str, mess
 
 def get_ai_login_selectors(html_snippet: str, api_key: str = None, scan_id: str = None) -> dict:
     """Helper to extract login selectors using the configured AI provider, if a key is present."""
-    gen_key = api_key or settings.OPENROUTER_API_KEY
-    if not gen_key:
+    from .ai_provider import create_ai_model
+    model = create_ai_model(scan_id, api_key)
+    if model is None:
         return {}
     try:
         from .database import track_llm_call
-        from .ai_provider import OpenRouterModel
-        model = OpenRouterModel(api_key=gen_key, model_name=settings.OPENROUTER_PRIMARY_MODEL,
-                                 fallback_models=[m.strip() for m in settings.OPENROUTER_FALLBACK_MODELS.split(",") if m.strip()],
-                                 scan_id=scan_id)
         prompt = f"""
         Analyze the following HTML elements extracted from a login page:
         ```html

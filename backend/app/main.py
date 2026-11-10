@@ -13,6 +13,7 @@ from .crawler import crawl_site
 from .mcp_explorer import run_mcp_discovery, run_mcp_gap_exploration
 from .generator import generate_test_cases, export_to_excel
 from .schemas import ScanRequest, ScanResponse, ScanHistoryItem, ScopeContext
+from .ai_provider import ai_provider_name, ai_model_name
 from typing import Optional
 
 
@@ -438,6 +439,11 @@ async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks, cl
     )
 
     log_pipeline(scan_id, scope_ctx, "SCAN-CONFIG", f"Scan request received for URL: {request.url}")
+    log_pipeline(scan_id, scope_ctx, "SCAN-CONFIG", f"AI provider: {ai_provider_name()} | model: {ai_model_name()}")
+    if request.openrouter_api_key and ai_provider_name() != "OpenRouter":
+        log_pipeline(scan_id, scope_ctx, "SCAN-CONFIG",
+                     f"[WARNING] An OpenRouter API key was supplied with this request but AI_PROVIDER is "
+                     f"{ai_provider_name()} - the key is ignored and the server-side {ai_provider_name()} key is used.")
     log_pipeline(scan_id, scope_ctx, "SCAN-CONFIG",
                  f"Parameters: scan_scope={scope_ctx.scan_scope}, parent_module={scope_ctx.parent_module}, selected_module={scope_ctx.selected_module}")
     add_scan_log(scan_id,

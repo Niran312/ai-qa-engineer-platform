@@ -16,6 +16,7 @@ from app.main import app as fastapi_app
 import uuid
 from pydantic import ValidationError
 
+@unittest.mock.patch.object(settings, "AI_PROVIDER", "openrouter")
 class TestScopeContextAndFirewall(unittest.TestCase):
     def test_schemas_validation(self):
         """Proves that parent_module and selected_module are mandatory for MODULE scope."""
@@ -504,6 +505,7 @@ class TestPlaywrightCoreEngine(unittest.TestCase):
         self._run(feature_queue, page=page)
         self.assertTrue(all(u == target_url for u in visited_urls))
 
+@unittest.mock.patch.object(settings, "AI_PROVIDER", "openrouter")
 class TestGenerateTestCasesAgainstRealScanData(unittest.TestCase):
     """Regression test for the 'name scan_scope is not defined' crash: replays the real
     app_map from a scan that hit it (stored in qa_platform.db) through generate_test_cases()
@@ -756,6 +758,7 @@ class TestPlaywrightCoreLiveIntegration(unittest.TestCase):
         self.assertTrue(feat.is_observed)
 
 
+@unittest.mock.patch.object(settings, "AI_PROVIDER", "openrouter")
 class TestOpenRouterConfig(unittest.TestCase):
     """Config-layer proof that the model is server-controlled only, never a frontend override."""
 
@@ -988,6 +991,7 @@ class TestScanClientIsolation(unittest.TestCase):
         self.assertIsNone(get_scan(new_scan_id, self.client_b))
 
 
+@unittest.mock.patch.object(settings, "AI_PROVIDER", "openrouter")
 class TestGenerationDataFlow(unittest.TestCase):
     """Regression suite for the OpenRouter-vs-fallback data-flow bug: a Stage 1 OpenRouter
     failure was not caught locally (query_llm() sat outside its own try/except), so it
@@ -1199,7 +1203,7 @@ class TestLoginCredentialsNeverSentToAI(unittest.TestCase):
             if "PAGE STATE" in prompt:
                 return FakeResp(next(login_steps, '{"login_complete": true}'))
             return FakeResp("[]")
-        mock_model_cls.return_value.generate_content.side_effect = fake_generate
+        mock_model_cls.return_value.generate_content.side_effect = fake_generate  # create_ai_model() -> fake model
 
         client = mock_client_cls.return_value
 
@@ -1235,7 +1239,7 @@ class TestLoginCredentialsNeverSentToAI(unittest.TestCase):
         self.assertIn(self.PASSWORD, self.typed)
 
     @unittest.mock.patch('app.playwright_core_engine.run_playwright_core_exploration')
-    @unittest.mock.patch('app.mcp_explorer.OpenRouterModel')
+    @unittest.mock.patch('app.mcp_explorer.create_ai_model')
     @unittest.mock.patch('app.mcp_explorer.PlaywrightMCPClient')
     @unittest.mock.patch('app.mcp_explorer.update_scan_perf_data')
     @unittest.mock.patch('app.mcp_explorer.save_completed_stage_dur')
@@ -1254,7 +1258,7 @@ class TestLoginCredentialsNeverSentToAI(unittest.TestCase):
             pass  # later exploration outcome is irrelevant here (stubbed LLM) - only the login flow is under test
         self._assert_no_leak()
 
-    @unittest.mock.patch('app.mcp_explorer.OpenRouterModel')
+    @unittest.mock.patch('app.mcp_explorer.create_ai_model')
     @unittest.mock.patch('app.mcp_explorer.PlaywrightMCPClient')
     @unittest.mock.patch('app.mcp_explorer.update_scan_perf_data')
     @unittest.mock.patch('app.mcp_explorer.save_completed_stage_dur')
@@ -1315,3 +1319,96 @@ class TestMCPArgumentCompatibility(unittest.TestCase):
         md = '### Result\n"http://example.com/clients/list?page=2"\n### Ran Playwright code\n```js\nawait page.evaluate(...)\n```'
         self.assertEqual(_extract_url(md), "http://example.com/clients/list?page=2")
         self.assertEqual(_extract_url("http://plain/url"), "http://plain/url")
+
+
+class TestAnthropicProvider(unittest.TestCase):
+    """AnthropicModel + provider selection. The Anthropic SDK stream is mocked - no API calls."""
+
+    @staticmethod
+    def _message(text="ok", stop_reason="end_turn", model="claude-sonnet-5-5", stop_details=None):
+        from types import SimpleNamespace as NS
+        return NS(
+            content=[NS(type="thinking", thinking=""), NS(type="text", text=text)],
+            stop_reason=stop_reason, stop_details=stop_details, model=model,
+            usage=NS(input_tokens=11, output_tokens=7),
+        )
+
+    def _model_with(self, message=None, error=None):
+        from app.ai_provider import AnthropicModel
+        model = AnthropicModel(api_key="sk-ant-test", scan_id=None)
+        stream_cm = unittest.mock.MagicMock()
+        if error is not None:
+            stream_cm.__enter__.side_effect = error
+        else:
+            stream_cm.__enter__.return_value.get_final_message.return_value = message
+        model._client = unittest.mock.MagicMock()
+        model._client.beta.messages.stream.return_value = stream_cm
+        return model
+
+    def test_defaults_are_anthropic_and_sonnet(self):
+        self.assertEqual(Settings.model_fields["AI_PROVIDER"].default, "anthropic")
+        self.assertEqual(Settings.model_fields["ANTHROPIC_MODEL"].default, "claude-sonnet-5-5")
+
+    def test_success_returns_text_only_and_sends_expected_request(self):
+        model = self._model_with(self._message(text='[{"a": 1}]'))
+        self.assertEqual(model.generate_content("prompt").text, '[{"a": 1}]')
+        kwargs = model._client.beta.messages.stream.call_args.kwargs
+        self.assertEqual(kwargs["model"], "claude-sonnet-5-5")
+        self.assertEqual(kwargs["fallbacks"], "default")
+        self.assertIn("server-side-fallback-2026-07-01", kwargs["betas"])
+        self.assertEqual(kwargs["output_config"], {"effort": settings.ANTHROPIC_EFFORT})
+        self.assertEqual(kwargs["messages"], [{"role": "user", "content": "prompt"}])
+        self.assertNotIn("temperature", kwargs)
+
+    def test_refusal_raises(self):
+        from types import SimpleNamespace as NS
+        model = self._model_with(self._message(text="", stop_reason="refusal", stop_details=NS(category="cyber")))
+        with self.assertRaises(AIProviderError) as ctx:
+            model.generate_content("p")
+        self.assertEqual(ctx.exception.error_type, "refusal")
+
+    def test_truncated_response_raises(self):
+        model = self._model_with(self._message(text='[{"a":', stop_reason="max_tokens"))
+        with self.assertRaises(AIProviderError) as ctx:
+            model.generate_content("p")
+        self.assertEqual(ctx.exception.error_type, "max_tokens")
+
+    def test_sdk_errors_are_classified(self):
+        import anthropic, httpx2
+        req = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+        cases = [
+            (anthropic.AuthenticationError("bad key", response=httpx2.Response(401, request=req), body=None), "invalid_api_key"),
+            (anthropic.RateLimitError("slow down", response=httpx2.Response(429, request=req), body=None), "rate_limit"),
+            (anthropic.NotFoundError("no model", response=httpx2.Response(404, request=req), body=None), "model_unavailable"),
+            (anthropic.APITimeoutError(request=req), "timeout"),
+        ]
+        for error, expected in cases:
+            with self.subTest(expected=expected):
+                with self.assertRaises(AIProviderError) as ctx:
+                    self._model_with(error=error).generate_content("p")
+                self.assertEqual(ctx.exception.error_type, expected)
+                self.assertNotIn("sk-ant-test", str(ctx.exception))
+
+    def test_factory_selects_provider_and_never_sends_request_key_to_anthropic(self):
+        from app.ai_provider import create_ai_model, AnthropicModel
+        with unittest.mock.patch.object(settings, "AI_PROVIDER", "anthropic"):
+            with unittest.mock.patch.object(settings, "ANTHROPIC_API_KEY", ""):
+                # A key typed into the frontend's OpenRouter panel must not enable/feed Anthropic.
+                self.assertIsNone(create_ai_model("s", request_api_key="sk-or-from-frontend"))
+            with unittest.mock.patch.object(settings, "ANTHROPIC_API_KEY", "sk-ant-server"):
+                m = create_ai_model("s", request_api_key="sk-or-from-frontend")
+                self.assertIsInstance(m, AnthropicModel)
+                self.assertEqual(m._client.api_key, "sk-ant-server")
+        with unittest.mock.patch.object(settings, "AI_PROVIDER", "openrouter"), \
+             unittest.mock.patch.object(settings, "OPENROUTER_API_KEY", ""):
+            m = create_ai_model("s", request_api_key="sk-or-from-frontend")
+            self.assertIsInstance(m, OpenRouterModel)
+            self.assertEqual(m.api_key, "sk-or-from-frontend")
+            self.assertIsNone(create_ai_model("s", request_api_key=None))
+
+    def test_no_anthropic_key_falls_back_to_structural_cases(self):
+        with unittest.mock.patch.object(settings, "AI_PROVIDER", "anthropic"), \
+             unittest.mock.patch.object(settings, "ANTHROPIC_API_KEY", ""):
+            cases = generate_test_cases("anthropic_no_key", {"nodes": [], "edges": []}, "desc", api_key=None)
+        self.assertIsInstance(cases, list)
+        self.assertTrue(all(tc.get("generation_source") == "STRUCTURAL_FALLBACK" for tc in cases))
