@@ -251,29 +251,71 @@ class AnthropicModel:
 
 
 # --- Provider selection ---------------------------------------------------------------------
+#
+# Bring-your-own-key: each user can enter their own key in the frontend, and its prefix decides
+# the provider. A server-side key (ANTHROPIC_API_KEY / OPENROUTER_API_KEY, per AI_PROVIDER) is
+# only an optional fallback for requests that don't bring one. User keys live in memory for the
+# duration of one scan only - they are never written to the database, logs, or perf data.
 
-def ai_provider_name() -> str:
+ANTHROPIC_KEY_PREFIX = "sk-ant-"
+OPENROUTER_KEY_PREFIX = "sk-or-"
+
+
+def detect_provider(api_key: str):
+    """Returns "Anthropic" / "OpenRouter" from the key's prefix, or None if unrecognized."""
+    key = (api_key or "").strip()
+    if key.startswith(ANTHROPIC_KEY_PREFIX):
+        return "Anthropic"
+    if key.startswith(OPENROUTER_KEY_PREFIX):
+        return "OpenRouter"
+    return None
+
+
+def _default_provider() -> str:
     return "Anthropic" if settings.AI_PROVIDER.strip().lower() == "anthropic" else "OpenRouter"
 
 
-def ai_model_name() -> str:
-    return settings.ANTHROPIC_MODEL if ai_provider_name() == "Anthropic" else settings.OPENROUTER_PRIMARY_MODEL
+def _model_for(provider: str) -> str:
+    return settings.ANTHROPIC_MODEL if provider == "Anthropic" else settings.OPENROUTER_PRIMARY_MODEL
+
+
+def resolve_ai(request_api_key: str = None):
+    """Returns (provider, api_key_or_None, model_name, key_source) for one scan.
+
+    key_source is "user" (key typed in the frontend), "server" (configured fallback) or "none".
+    A user key with an unrecognized prefix falls back to the default provider here; the API
+    layer rejects such keys up front with a 400, so this only matters for direct callers.
+    """
+    user_key = (request_api_key or "").strip()
+    if user_key:
+        provider = detect_provider(user_key) or _default_provider()
+        return provider, user_key, _model_for(provider), "user"
+    provider = _default_provider()
+    server_key = settings.ANTHROPIC_API_KEY if provider == "Anthropic" else settings.OPENROUTER_API_KEY
+    if server_key:
+        return provider, server_key, _model_for(provider), "server"
+    return provider, None, _model_for(provider), "none"
+
+
+def server_key_configured() -> bool:
+    return resolve_ai(None)[3] == "server"
+
+
+def ai_provider_name(request_api_key: str = None) -> str:
+    return resolve_ai(request_api_key)[0]
+
+
+def ai_model_name(request_api_key: str = None) -> str:
+    return resolve_ai(request_api_key)[2]
 
 
 def create_ai_model(scan_id: str = None, request_api_key: str = None):
-    """Returns a model for the configured provider, or None when that provider has no key.
-
-    request_api_key is the optional key typed into the frontend's "OpenRouter AI Settings"
-    panel, so it only ever applies to the OpenRouter provider - it is never sent to Anthropic.
-    """
-    if ai_provider_name() == "Anthropic":
-        if not settings.ANTHROPIC_API_KEY:
-            return None
-        return AnthropicModel(api_key=settings.ANTHROPIC_API_KEY, scan_id=scan_id)
-
-    key = request_api_key or settings.OPENROUTER_API_KEY
+    """Returns a model for this scan's provider/key, or None when no key is available at all."""
+    provider, key, _, _ = resolve_ai(request_api_key)
     if not key:
         return None
+    if provider == "Anthropic":
+        return AnthropicModel(api_key=key, scan_id=scan_id)
     return OpenRouterModel(api_key=key, model_name=settings.OPENROUTER_PRIMARY_MODEL,
                            fallback_models=[m.strip() for m in settings.OPENROUTER_FALLBACK_MODELS.split(",") if m.strip()],
                            scan_id=scan_id)

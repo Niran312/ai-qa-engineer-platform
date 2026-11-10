@@ -1389,22 +1389,69 @@ class TestAnthropicProvider(unittest.TestCase):
                 self.assertEqual(ctx.exception.error_type, expected)
                 self.assertNotIn("sk-ant-test", str(ctx.exception))
 
-    def test_factory_selects_provider_and_never_sends_request_key_to_anthropic(self):
-        from app.ai_provider import create_ai_model, AnthropicModel
+    def test_user_key_prefix_selects_provider(self):
+        from app.ai_provider import create_ai_model, AnthropicModel, detect_provider, resolve_ai
+        self.assertEqual(detect_provider("sk-ant-api03-xyz"), "Anthropic")
+        self.assertEqual(detect_provider("  sk-or-v1-xyz "), "OpenRouter")
+        self.assertIsNone(detect_provider("AIza-something"))
+        # A user's own key always wins over the server default, whichever provider it belongs to.
+        for default in ("anthropic", "openrouter"):
+            with self.subTest(default=default), \
+                 unittest.mock.patch.object(settings, "AI_PROVIDER", default), \
+                 unittest.mock.patch.object(settings, "ANTHROPIC_API_KEY", "sk-ant-server"), \
+                 unittest.mock.patch.object(settings, "OPENROUTER_API_KEY", "sk-or-server"):
+                m = create_ai_model("s", request_api_key="sk-ant-user")
+                self.assertIsInstance(m, AnthropicModel)
+                self.assertEqual(m._client.api_key, "sk-ant-user")
+                self.assertEqual(m.model_name, "claude-sonnet-5-5")
+                m = create_ai_model("s", request_api_key="sk-or-v1-user")
+                self.assertIsInstance(m, OpenRouterModel)
+                self.assertEqual(m.api_key, "sk-or-v1-user")
+                self.assertEqual(resolve_ai("sk-ant-user")[3], "user")
+
+    def test_server_key_is_optional_fallback(self):
+        from app.ai_provider import create_ai_model, AnthropicModel, resolve_ai, server_key_configured
         with unittest.mock.patch.object(settings, "AI_PROVIDER", "anthropic"):
             with unittest.mock.patch.object(settings, "ANTHROPIC_API_KEY", ""):
-                # A key typed into the frontend's OpenRouter panel must not enable/feed Anthropic.
-                self.assertIsNone(create_ai_model("s", request_api_key="sk-or-from-frontend"))
+                self.assertIsNone(create_ai_model("s", request_api_key=None))
+                self.assertFalse(server_key_configured())
+                self.assertEqual(resolve_ai(None)[3], "none")
             with unittest.mock.patch.object(settings, "ANTHROPIC_API_KEY", "sk-ant-server"):
-                m = create_ai_model("s", request_api_key="sk-or-from-frontend")
+                m = create_ai_model("s", request_api_key="   ")
                 self.assertIsInstance(m, AnthropicModel)
                 self.assertEqual(m._client.api_key, "sk-ant-server")
-        with unittest.mock.patch.object(settings, "AI_PROVIDER", "openrouter"), \
-             unittest.mock.patch.object(settings, "OPENROUTER_API_KEY", ""):
-            m = create_ai_model("s", request_api_key="sk-or-from-frontend")
-            self.assertIsInstance(m, OpenRouterModel)
-            self.assertEqual(m.api_key, "sk-or-from-frontend")
-            self.assertIsNone(create_ai_model("s", request_api_key=None))
+                self.assertTrue(server_key_configured())
+
+    def test_scan_request_accepts_legacy_field_and_trims(self):
+        self.assertEqual(ScanRequest(url="http://x", api_key="  sk-ant-k  ").api_key, "sk-ant-k")
+        legacy = ScanRequest(url="http://x", openrouter_api_key="sk-or-legacy")
+        self.assertEqual(legacy.api_key, "sk-or-legacy")
+        self.assertIsNone(legacy.openrouter_api_key)
+        self.assertIsNone(ScanRequest(url="http://x", api_key="   ").api_key)
+
+    def test_api_rejects_unrecognized_key_and_exposes_config(self):
+        client = TestClient(fastapi_app)
+        headers = {"X-Client-ID": str(uuid.uuid4())}
+        resp = client.post("/api/scan", json={"url": "http://example.com", "api_key": "not-a-real-key"}, headers=headers)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("sk-ant-", resp.json()["detail"])
+        self.assertNotIn("not-a-real-key", resp.text)
+        with unittest.mock.patch.object(settings, "AI_PROVIDER", "anthropic"), \
+             unittest.mock.patch.object(settings, "ANTHROPIC_API_KEY", ""):
+            cfg = client.get("/api/config").json()
+        self.assertEqual(cfg["server_key_configured"], False)
+        self.assertEqual(cfg["accepted_key_prefixes"], ["sk-ant-", "sk-or-"])
+
+    def test_user_key_never_persisted_or_logged(self):
+        key = "sk-ant-user-secret-123"
+        client = TestClient(fastapi_app)
+        headers = {"X-Client-ID": str(uuid.uuid4())}
+        with unittest.mock.patch("app.main.background_crawl_task") as bg:
+            resp = client.post("/api/scan", json={"url": "http://example.com", "api_key": key}, headers=headers)
+        self.assertEqual(resp.status_code, 201)
+        self.assertIn(key, bg.call_args.args)          # handed to the in-memory task...
+        scan = client.get(f"/api/scan/{resp.json()['scan_id']}", headers=headers).text
+        self.assertNotIn(key, scan)                      # ...but never stored in logs/perf data/DB
 
     def test_no_anthropic_key_falls_back_to_structural_cases(self):
         with unittest.mock.patch.object(settings, "AI_PROVIDER", "anthropic"), \
