@@ -470,7 +470,8 @@ def generate_test_cases(scan_id: str, app_map: dict, user_description: str, api_
         Scope: {scan_scope_str}
         {f"Target module: {scope_ctx.parent_module} -> {scope_ctx.selected_module}. Only build modules from the CRAWLED PAGES DETAILS above - do not invent additional modules outside that list." if is_module_scope else ""}
         {scope_precondition_note}
-        User description: "{user_description or 'Focus on dynamic form validations.'}"
+        SCAN INSTRUCTIONS:
+        {user_description or 'Focus on dynamic form validations.'}
 
         Return ONLY a JSON object matching the schema.
         """

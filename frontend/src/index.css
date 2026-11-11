@@ -1057,32 +1057,6 @@ body {
   }
 }
 
-/* AI Instructions Styling */
-.reset-btn {
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  font-size: 0.8rem;
-  font-weight: 500;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  cursor: pointer;
-  transition: all 0.2s ease-in-out;
-  padding: 4px 8px;
-  border-radius: 6px;
-}
-
-.reset-btn:hover:not(:disabled) {
-  color: var(--text-main);
-  background: rgba(255, 255, 255, 0.05);
-}
-
-.reset-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
 .helper-text {
   font-size: 0.8rem;
   color: var(--text-muted);
