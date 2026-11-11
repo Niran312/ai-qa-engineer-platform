@@ -1173,6 +1173,54 @@ class TestGenerationDataFlow(unittest.TestCase):
             self.assertIn('"feature"', prompt)
 
 
+class TestServerSideScanInstructions(unittest.TestCase):
+    """The default QA prompt lives on the server and applies to every scan; the user's text is
+    only an optional addition on top of it."""
+
+    def test_entire_scope_fills_every_placeholder(self):
+        from app.scan_instructions import build_scan_instructions
+        for ctx in (None, ScopeContext(scan_scope="entire")):
+            with self.subTest(ctx=ctx):
+                text = build_scan_instructions(ctx, None)
+                self.assertNotIn("{{", text)
+                self.assertIn("ENTIRE APPLICATION", text)
+                self.assertNotIn("ADDITIONAL USER INSTRUCTIONS", text)
+
+    def test_extra_instructions_are_appended_not_replacing_default(self):
+        from app.scan_instructions import build_scan_instructions
+        default = build_scan_instructions(ScopeContext(scan_scope="entire"), None)
+        text = build_scan_instructions(ScopeContext(scan_scope="entire"), "  Focus on checkout.  ")
+        self.assertTrue(text.startswith(default))
+        self.assertTrue(text.endswith("Focus on checkout."))
+        self.assertEqual(build_scan_instructions(None, "   "), default)  # blank = no extras
+
+    def test_module_scope_uses_module_prompt(self):
+        from app.scan_instructions import build_scan_instructions
+        ctx = ScopeContext(scan_scope="module", parent_module="Manage", selected_module="Clients")
+        text = build_scan_instructions(ctx, "Only the edit form")
+        self.assertNotIn("{{", text)
+        self.assertIn("Manage → Clients", text)
+        self.assertIn("Only the edit form", text)
+
+    def test_pipeline_sends_default_prompt_to_generator_and_user_text_to_explorer(self):
+        import asyncio
+        from app import main as app_main
+        from app.scan_instructions import build_scan_instructions
+        scan_id = str(uuid.uuid4())
+        create_scan(scan_id, "http://example.com", "Focus on checkout.", str(uuid.uuid4()))
+        ctx = ScopeContext(scan_scope="entire")
+        with unittest.mock.patch.object(app_main, "crawl_site",
+                                        new=unittest.mock.AsyncMock(return_value=({}, [], 0, None))), \
+             unittest.mock.patch.object(app_main, "run_mcp_discovery",
+                                        new=unittest.mock.AsyncMock(return_value=json.dumps({}))) as mcp, \
+             unittest.mock.patch.object(app_main, "generate_test_cases", return_value=[]) as gen, \
+             unittest.mock.patch.object(app_main, "export_to_excel", return_value="x.xlsx"):
+            asyncio.run(app_main.background_crawl_task(
+                scan_id, "http://example.com", None, None, "Focus on checkout.", "sk-ant-x", None, ctx))
+        self.assertEqual(mcp.call_args.kwargs["user_description"], "Focus on checkout.")
+        self.assertEqual(gen.call_args.args[2], build_scan_instructions(ctx, "Focus on checkout."))
+
+
 if __name__ == "__main__":
     unittest.main()
 

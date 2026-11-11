@@ -13,6 +13,7 @@ from .crawler import crawl_site
 from .mcp_explorer import run_mcp_discovery, run_mcp_gap_exploration
 from .generator import generate_test_cases, export_to_excel
 from .schemas import ScanRequest, ScanResponse, ScanHistoryItem, ScopeContext
+from .scan_instructions import build_scan_instructions
 from .ai_provider import resolve_ai, detect_provider, server_key_configured
 from typing import Optional
 
@@ -222,8 +223,11 @@ async def background_crawl_task(scan_id: str, url: str, username: str, password:
             # generate_test_cases() makes many blocking OpenRouter HTTP calls (requests) - run it in a
             # worker thread so it doesn't freeze the event loop (and every other API request,
             # including the frontend's status polling) for the whole generation stage.
+            # The generator gets the full server-side default prompt plus the user's extra
+            # instructions; the MCP explorer above only gets the user's own (short) text.
             test_cases = await asyncio.to_thread(
-                generate_test_cases, scan_id, app_map, description, api_key=api_key, model_name=model_name,
+                generate_test_cases, scan_id, app_map, build_scan_instructions(scope_ctx, description),
+                api_key=api_key, model_name=model_name,
                 mcp_behavior=mcp_behavior_json, scope_ctx=scope_ctx
             )
         gen_end = time.perf_counter()
