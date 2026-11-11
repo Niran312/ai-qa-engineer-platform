@@ -430,6 +430,12 @@ async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks, cl
     if request.api_key and detect_provider(request.api_key) is None:
         raise HTTPException(status_code=400,
                             detail="Unrecognized API key format. Enter an Anthropic key (sk-ant-...) or an OpenRouter key (sk-or-...).")
+    provider, _, model, key_source = resolve_ai(request.api_key)
+    if key_source == "none":
+        # No user key and no server fallback key: reject instead of silently degrading to
+        # structural-only test cases.
+        raise HTTPException(status_code=400,
+                            detail="An AI API key is required. Enter an Anthropic key (sk-ant-...) or an OpenRouter key (sk-or-...).")
 
     scan_id = str(uuid.uuid4())
     create_scan(scan_id, str(request.url), request.description, client_id)
@@ -443,13 +449,8 @@ async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks, cl
     )
 
     log_pipeline(scan_id, scope_ctx, "SCAN-CONFIG", f"Scan request received for URL: {request.url}")
-    provider, _, model, key_source = resolve_ai(request.api_key)
     # Never log the key itself - only which provider/model it selects and where it came from.
     log_pipeline(scan_id, scope_ctx, "SCAN-CONFIG", f"AI provider: {provider} | model: {model} | key: {key_source}")
-    if key_source == "none":
-        log_pipeline(scan_id, scope_ctx, "SCAN-CONFIG",
-                     "[WARNING] No AI API key provided and no server key configured - "
-                     "AI exploration is skipped and structural test cases are generated instead.")
     log_pipeline(scan_id, scope_ctx, "SCAN-CONFIG",
                  f"Parameters: scan_scope={scope_ctx.scan_scope}, parent_module={scope_ctx.parent_module}, selected_module={scope_ctx.selected_module}")
     add_scan_log(scan_id,
