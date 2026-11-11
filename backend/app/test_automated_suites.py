@@ -982,7 +982,7 @@ class TestScanClientIsolation(unittest.TestCase):
             with TestClient(fastapi_app) as client:
                 resp = client.post(
                     "/api/scan",
-                    json={"url": "http://example.com/new-scan"},
+                    json={"url": "http://example.com/new-scan", "api_key": "sk-ant-test"},
                     headers={"X-Client-ID": self.client_a},
                 )
         self.assertEqual(resp.status_code, 201)
@@ -1441,6 +1441,28 @@ class TestAnthropicProvider(unittest.TestCase):
             cfg = client.get("/api/config").json()
         self.assertEqual(cfg["server_key_configured"], False)
         self.assertEqual(cfg["accepted_key_prefixes"], ["sk-ant-", "sk-or-"])
+
+    def test_api_rejects_scan_without_any_key(self):
+        client = TestClient(fastapi_app)
+        headers = {"X-Client-ID": str(uuid.uuid4())}
+        with unittest.mock.patch("app.main.background_crawl_task") as bg, \
+             unittest.mock.patch.object(settings, "AI_PROVIDER", "anthropic"), \
+             unittest.mock.patch.object(settings, "ANTHROPIC_API_KEY", ""):
+            for body in ({"url": "http://example.com"}, {"url": "http://example.com", "api_key": "   "}):
+                resp = client.post("/api/scan", json=body, headers=headers)
+                self.assertEqual(resp.status_code, 400)
+                self.assertIn("API key is required", resp.json()["detail"])
+        bg.assert_not_called()
+        self.assertEqual(client.get("/api/scans", headers=headers).json(), [])  # no scan row created
+
+    def test_api_accepts_keyless_scan_when_server_key_configured(self):
+        client = TestClient(fastapi_app)
+        headers = {"X-Client-ID": str(uuid.uuid4())}
+        with unittest.mock.patch("app.main.background_crawl_task"), \
+             unittest.mock.patch.object(settings, "AI_PROVIDER", "anthropic"), \
+             unittest.mock.patch.object(settings, "ANTHROPIC_API_KEY", "sk-ant-server"):
+            resp = client.post("/api/scan", json={"url": "http://example.com"}, headers=headers)
+        self.assertEqual(resp.status_code, 201)
 
     def test_user_key_never_persisted_or_logged(self):
         key = "sk-ant-user-secret-123"
